@@ -1,0 +1,601 @@
+﻿@page "/"
+@using DiskMountUtility.Application.Services
+@using DiskMountUtility.Application.DTOs
+@using DiskMountUtility.Infrastructure.Cryptography
+@using Microsoft.AspNetCore.Components.Server.ProtectedBrowserStorage
+@using Microsoft.AspNetCore.Components.Web
+@inject DiskManagementService DiskService
+@inject NavigationManager Navigation
+@inject ProtectedSessionStorage SessionStorage
+@implements IDisposable
+
+<PageTitle>Disk Mount Utility</PageTitle>
+
+@if (!isVaultUnlocked)
+{
+    <div class="modal-overlay">
+        <div class="modal" @onclick:stopPropagation="true">
+            <h2>Unlock Local Vault</h2>
+            <div class="form-group">
+                <label>Database Password</label>
+                <input type="password" class="form-control" @bind="vaultPassword" placeholder="Enter your vault password" />
+            </div>
+            @if (!string.IsNullOrEmpty(errorMessage))
+            {
+                <div class="error-message">@errorMessage</div>
+            }
+            <div class="modal-actions">
+                <button class="btn btn-primary" @onclick="UnlockVault" disabled="@isProcessing">
+                    @(isProcessing ? "Unlocking..." : "Unlock")
+                </button>
+            </div>
+        </div>
+    </div>
+}
+
+<div class="container">
+    <div class="header">
+        <h1>Virtual Disk Manager</h1>
+        <p>Secure disk management with post-quantum cryptography</p>
+    </div>
+
+    <div class="main-content">
+        @if (mountedDisk != null)
+        {
+            <div class="mounted-disk-section">
+                <div class="section-header">
+                    <h2>Mounted Disk: @mountedDisk.Name</h2>
+                    <button class="btn btn-danger" @onclick="UnmountDisk">Unmount</button>
+                </div>
+
+                <div class="disk-card mounted">
+                    <div class="disk-info">
+                        <h3>@mountedDisk.Name</h3>
+                        <div class="disk-stats">
+                            <div class="stat">
+                                <span class="label">Size:</span>
+                                <span class="value">@FormatBytes(mountedDisk.SizeInBytes)</span>
+                            </div>
+                            <div class="stat">
+                                <span class="label">Used:</span>
+                                <span class="value">@FormatBytes(mountedDisk.UsedSpaceInBytes)</span>
+                            </div>
+                            <div class="stat">
+                                <span class="label">Free:</span>
+                                <span class="value">@FormatBytes(mountedDisk.FreeSpaceInBytes)</span>
+                            </div>
+                        </div>
+                        <div class="usage-bar">
+                            <div class="usage-fill" style="width: @mountedDisk.UsagePercentage%"></div>
+                        </div>
+                        <p class="usage-text">@mountedDisk.UsagePercentage.ToString("F2")% used</p>
+                    </div>
+                    <div class="disk-actions">
+                        <button class="btn btn-primary" @onclick="NavigateToFileExplorer">Browse Files</button>
+                        <button class="btn btn-secondary" @onclick="() => ShowResizeDialog(mountedDisk)">Resize Disk</button>
+                    </div>
+                </div>
+            </div>
+        }
+        else
+        {
+            <div class="no-disk-section">
+                <div class="empty-state">
+                    <h2>No Disk Mounted</h2>
+                    <p>Create a new virtual disk or mount an existing one</p>
+                </div>
+            </div>
+        }
+
+        <div class="disks-section">
+            <div class="section-header">
+                <h2>Available Disks</h2>
+                <button class="btn btn-success" @onclick="ShowCreateDialog">Create New Disk</button>
+            </div>
+
+            @if (disks.Any())
+            {
+                <div class="disks-grid">
+                    @foreach (var disk in disks)
+                    {
+                        <div class="disk-card @(disk.Status == "Mounted" ? "mounted" : "")">
+                            <div class="disk-info">
+                                <h3>@disk.Name</h3>
+                                <span class="status-badge status-@disk.Status.ToLower()">@disk.Status</span>
+                                <div class="disk-stats">
+                                    <div class="stat">
+                                        <span class="label">Size:</span>
+                                        <span class="value">@FormatBytes(disk.SizeInBytes)</span>
+                                    </div>
+                                    <div class="stat">
+                                        <span class="label">Created:</span>
+                                        <span class="value">@disk.CreatedAt.ToLocalTime().ToString("g")</span>
+                                    </div>
+                                </div>
+                            </div>
+                            @if (disk.Status != "Mounted")
+                            {
+                                <div class="disk-actions-centered">
+                                    <button class="btn btn-primary" @onclick="() => ShowMountDialog(disk.Id)">Mount</button>
+                                    <button class="btn btn-secondary" @onclick="() => ShowResizeDialog(disk)">Resize</button>
+                                    <button class="btn btn-danger" @onclick="() => DeleteDisk(disk.Id)">Delete</button>
+                                </div>
+                            }
+                        </div>
+                    }
+                </div>
+            }
+            else
+            {
+                <p class="no-disks">No virtual disks created yet</p>
+            }
+        </div>
+    </div>
+</div>
+
+@if (showCreateDialog)
+{
+    <div class="modal-overlay" @onclick="CloseDialogs">
+        <div class="modal" @onclick:stopPropagation="true">
+            <h2>Create Virtual Disk</h2>
+            <div class="form-group">
+                <label>Disk Name</label>
+                <input type="text" class="form-control" @bind="newDiskName" placeholder="My Secure Disk" />
+            </div>
+            <div class="form-group">
+                <label>Size (MB)</label>
+                <input type="number" class="form-control" @bind="newDiskSize" placeholder="100" />
+            </div>
+            <div class="form-group">
+                <label>Password</label>
+                <input type="password" class="form-control" @bind="newDiskPassword" placeholder="Enter strong password" />
+            </div>
+            @if (!string.IsNullOrEmpty(errorMessage))
+            {
+                <div class="error-message">@errorMessage</div>
+            }
+            <div class="modal-actions">
+                <button class="btn btn-success" @onclick="CreateDisk" disabled="@isProcessing">
+                    @(isProcessing ? "Creating..." : "Create")
+                </button>
+                <button class="btn btn-secondary" @onclick="CloseDialogs">Cancel</button>
+            </div>
+        </div>
+    </div>
+}
+
+@if (showMountDialog)
+{
+    <div class="modal-overlay" @onclick="CloseDialogs">
+        <div class="modal" @onclick:stopPropagation="true">
+            <h2>Mount Virtual Disk</h2>
+            <div class="form-group">
+                <label>Password</label>
+                <input type="password" class="form-control" @bind="mountPassword" placeholder="Enter disk password" />
+            </div>
+            @if (!string.IsNullOrEmpty(errorMessage))
+            {
+                <div class="error-message">@errorMessage</div>
+            }
+            <div class="modal-actions">
+                <button class="btn btn-primary" @onclick="MountDisk" disabled="@isProcessing">
+                    @(isProcessing ? "Mounting..." : "Mount")
+                </button>
+                <button class="btn btn-secondary" @onclick="CloseDialogs">Cancel</button>
+            </div>
+        </div>
+    </div>
+}
+
+@if (showResizeDialog)
+{
+    <div class="modal-overlay" @onclick="CloseDialogs">
+        <div class="modal" @onclick:stopPropagation="true">
+            <h2>Resize Virtual Disk</h2>
+            <p><strong>@resizeDiskInfo?.Name</strong> (@resizeDiskInfo?.Status)</p>
+            <div class="form-group">
+                <label>New Size (MB)</label>
+                <input type="number" class="form-control" @bind="resizeNewSize" min="@(resizeDiskInfo!.SizeInBytes / (1024 * 1024))" />
+                <small>Current size: @FormatBytes(resizeDiskInfo!.SizeInBytes)</small>
+            </div>
+            @if (resizeDiskInfo.Status != "Mounted")
+            {
+                <div class="form-group">
+                    <label>Password</label>
+                    <input type="password" class="form-control" @bind="resizePassword" placeholder="Enter disk password" />
+                    <small style="color:#666;">Password required to resize unmounted disk</small>
+                </div>
+            }
+            @if (!string.IsNullOrEmpty(errorMessage))
+            {
+                <div class="error-message">@errorMessage</div>
+            }
+            <div class="modal-actions">
+                <button class="btn btn-primary" @onclick="ResizeDisk" disabled="@isProcessing">
+                    @(isProcessing ? "Resizing..." : "Resize")
+                </button>
+                <button class="btn btn-secondary" @onclick="CloseDialogs">Cancel</button>
+            </div>
+        </div>
+    </div>
+}
+
+<style>
+    .disk-actions-centered {
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        gap: 0.75rem;
+        margin-top: 1rem;
+        padding-top: 1rem;
+        border-top: 1px solid rgba(0,0,0,0.1);
+    }
+</style>
+
+@code {
+    private List<DiskInfoResponse> disks = new();
+    private DiskInfoResponse? mountedDisk;
+    private bool showCreateDialog = false;
+    private bool showMountDialog = false;
+    private bool showResizeDialog = false;
+    private bool isProcessing = false;
+    private string errorMessage = string.Empty;
+
+    private string newDiskName = string.Empty;
+    private long newDiskSize = 100;
+    private string newDiskPassword = string.Empty;
+
+    private Guid selectedDiskId;
+    private string mountPassword = string.Empty;
+
+    private DiskInfoResponse? resizeDiskInfo;
+    private long resizeNewSize = 0;
+    private string resizePassword = string.Empty;
+    private bool isVaultUnlocked = false;
+    private string vaultPassword = string.Empty;
+    private bool _initialized = false;
+
+    // ✅ NEW: Store mounted disk ID in session
+    private Guid? _mountedDiskId;
+    private string? _mountedDiskPassword;
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (firstRender && !_initialized)
+        {
+            try
+            {
+                var vaultState = await SessionStorage.GetAsync<bool>("VaultUnlocked");
+                var vaultPass = await SessionStorage.GetAsync<string>("VaultPassword");
+
+                if (vaultState.Success && vaultState.Value &&
+                    vaultPass.Success && !string.IsNullOrEmpty(vaultPass.Value))
+                {
+                    VaultKeyManager.Initialize(vaultPass.Value);
+                    isVaultUnlocked = true;
+
+                    // ✅ NEW: Restore mounted disk if any
+                    var mountedDiskIdResult = await SessionStorage.GetAsync<Guid?>("MountedDiskId");
+                    var mountedPasswordResult = await SessionStorage.GetAsync<string>("MountedDiskPassword");
+
+                    if (mountedDiskIdResult.Success && mountedDiskIdResult.Value.HasValue &&
+                        mountedPasswordResult.Success && !string.IsNullOrEmpty(mountedPasswordResult.Value))
+                    {
+                        _mountedDiskId = mountedDiskIdResult.Value;
+                        _mountedDiskPassword = mountedPasswordResult.Value;
+
+                        // Check current backend state
+                        mountedDisk = await DiskService.GetMountedDiskInfoAsync();
+
+                        if (mountedDisk == null)
+                        {
+                            Console.WriteLine($"🔄 Restoring mounted disk: {_mountedDiskId}");
+                            var success = await DiskService.MountDiskAsync(new MountDiskRequest
+                            {
+                                DiskId = _mountedDiskId.Value,
+                                Password = _mountedDiskPassword
+                            });
+
+                            if (success)
+                            {
+                                await LoadDisks();
+                                Console.WriteLine("✅ Disk restored successfully after reload");
+                            }
+                        }
+                        else
+                        {
+                            Console.WriteLine("✅ Disk already mounted, skipping re-mount after render");
+                        }
+                    }
+
+                    await LoadDisks();
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Vault restore failed: {ex.Message}");
+                isVaultUnlocked = false;
+            }
+
+            _initialized = true;
+            StateHasChanged();
+        }
+    }
+
+    private async Task LoadDisks()
+    {
+        disks = await DiskService.GetAllDisksAsync();
+        mountedDisk = await DiskService.GetMountedDiskInfoAsync();
+        StateHasChanged();
+    }
+
+    private void ShowCreateDialog()
+    {
+        newDiskName = string.Empty;
+        newDiskSize = 500;
+        newDiskPassword = string.Empty;
+        errorMessage = string.Empty;
+        showCreateDialog = true;
+    }
+
+    private void ShowMountDialog(Guid diskId)
+    {
+        selectedDiskId = diskId;
+        mountPassword = string.Empty;
+        errorMessage = string.Empty;
+        showMountDialog = true;
+    }
+
+    private void ShowResizeDialog(DiskInfoResponse disk)
+    {
+        resizeDiskInfo = disk;
+        resizeNewSize = disk.SizeInBytes / (1024 * 1024);
+        resizePassword = string.Empty;
+        errorMessage = string.Empty;
+        showResizeDialog = true;
+    }
+
+    private void CloseDialogs()
+    {
+        showCreateDialog = false;
+        showMountDialog = false;
+        showResizeDialog = false;
+        errorMessage = string.Empty;
+    }
+
+    private async Task UnlockVault()
+    {
+        if (string.IsNullOrWhiteSpace(vaultPassword))
+        {
+            errorMessage = "Please enter your vault password.";
+            return;
+        }
+
+        isProcessing = true;
+        errorMessage = string.Empty;
+
+        try
+        {
+            VaultKeyManager.Initialize(vaultPassword);
+            await DiskService.EnsureDatabaseReadyAsync();
+            await DiskService.InitializeDisksAfterUnlockAsync();
+
+            isVaultUnlocked = true;
+
+            await SessionStorage.SetAsync("VaultUnlocked", true);
+            await SessionStorage.SetAsync("VaultPassword", vaultPassword);
+
+            await LoadDisks();
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Failed to unlock vault: {ex.Message}";
+        }
+        finally
+        {
+            isProcessing = false;
+        }
+    }
+
+    private async Task CreateDisk()
+    {
+        if (string.IsNullOrWhiteSpace(newDiskName) || string.IsNullOrWhiteSpace(newDiskPassword) || newDiskSize <= 0)
+        {
+            errorMessage = "Please fill in all fields correctly";
+            return;
+        }
+
+        isProcessing = true;
+        errorMessage = string.Empty;
+
+        try
+        {
+            var request = new CreateDiskRequest
+            {
+                Name = newDiskName,
+                SizeInMB = newDiskSize,
+                Password = newDiskPassword
+            };
+
+            await DiskService.CreateDiskAsync(request);
+            await LoadDisks();
+            CloseDialogs();
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Failed to create disk: {ex.Message}";
+        }
+        finally
+        {
+            isProcessing = false;
+        }
+    }
+
+    private async Task MountDisk()
+    {
+        if (string.IsNullOrWhiteSpace(mountPassword))
+        {
+            errorMessage = "Please enter the password";
+            return;
+        }
+
+        isProcessing = true;
+        errorMessage = string.Empty;
+
+        try
+        {
+            var request = new MountDiskRequest
+            {
+                DiskId = selectedDiskId,
+                Password = mountPassword
+            };
+
+            var success = await DiskService.MountDiskAsync(request);
+            if (success)
+            {
+                // await DiskService.MountPhysicalAsync(selectedDiskId);
+
+                // ✅ NEW: Store mount info in session
+                await SessionStorage.SetAsync("MountedDiskId", selectedDiskId);
+                await SessionStorage.SetAsync("MountedDiskPassword", mountPassword);
+
+                await LoadDisks();
+                CloseDialogs();
+            }
+            else
+            {
+                errorMessage = "Failed to mount disk. Check your password.";
+            }
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Error: {ex.Message}";
+        }
+        finally
+        {
+            isProcessing = false;
+        }
+    }
+
+    private async Task UnmountDisk()
+    {
+        if (mountedDisk == null) return;
+
+        try
+        {
+            await DiskService.UnmountPhysicalAsync(mountedDisk.Id);
+            await DiskService.UnmountDiskAsync(mountedDisk.Id);
+
+            // ✅ NEW: Clear session storage
+            await SessionStorage.DeleteAsync("MountedDiskId");
+            await SessionStorage.DeleteAsync("MountedDiskPassword");
+
+            await LoadDisks();
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Failed to unmount disk: {ex.Message}";
+        }
+    }
+
+    private async Task ResizeDisk()
+    {
+        if (resizeDiskInfo == null || resizeNewSize < resizeDiskInfo.SizeInBytes / (1024 * 1024))
+        {
+            errorMessage = "New size must be larger than current size";
+            return;
+        }
+
+        if (resizeDiskInfo.Status != "Mounted" && string.IsNullOrWhiteSpace(resizePassword))
+        {
+            errorMessage = "Password is required to resize unmounted disk";
+            return;
+        }
+
+        isProcessing = true;
+        errorMessage = string.Empty;
+
+        try
+        {
+            var request = new ResizeDiskRequest
+            {
+                DiskId = resizeDiskInfo.Id,
+                NewSizeInMB = resizeNewSize
+            };
+
+            bool success;
+            if (resizeDiskInfo.Status == "Mounted")
+            {
+                success = await DiskService.ResizeDiskAsync(request);
+            }
+            else
+            {
+                success = await DiskService.ResizeDiskAsync(request, resizePassword);
+            }
+
+            if (success)
+            {
+                await LoadDisks();
+                CloseDialogs();
+            }
+            else
+            {
+                errorMessage = "Failed to resize disk. Check your password if resizing unmounted disk.";
+            }
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Error: {ex.Message}";
+        }
+        finally
+        {
+            isProcessing = false;
+        }
+    }
+
+    private async Task DeleteDisk(Guid diskId)
+    {
+        if (confirm("Are you sure you want to delete this disk? This action cannot be undone."))
+        {
+            try
+            {
+                await DiskService.DeleteDiskAsync(diskId);
+                await LoadDisks();
+            }
+            catch (Exception ex)
+            {
+                errorMessage = $"Failed to delete disk: {ex.Message}";
+            }
+        }
+    }
+
+    private void NavigateToFileExplorer()
+    {
+        Navigation.NavigateTo("/files");
+    }
+
+    private string FormatBytes(long bytes)
+    {
+        string[] sizes = { "B", "KB", "MB", "GB", "TB" };
+        double len = bytes;
+        int order = 0;
+
+        while (len >= 1024 && order < sizes.Length - 1)
+        {
+            order++;
+            len /= 1024;
+        }
+
+        return $"{len:0.##} {sizes[order]}";
+    }
+
+    private bool confirm(string message)
+    {
+        return true;
+    }
+
+    public void Dispose()
+    {
+        // Cleanup if needed
+    }
+}
