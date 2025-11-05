@@ -18,8 +18,7 @@ namespace DiskMountUtility.Application.FileWatcher
         private readonly SemaphoreSlim _processingLock = new(1, 1);
         private bool _disposed = false;
 
-        // ✅ FIX: Increased debounce to handle Windows write delays
-        private const int DebounceDelayMs = 3000;
+        private const int DebounceDelayMs = 2000;
 
         public event Action<string>? FileAdded;
         public event Action<string>? FileUpdated;
@@ -30,7 +29,6 @@ namespace DiskMountUtility.Application.FileWatcher
 
         public bool EnableDebugLogging { get; set; } = false;
 
-        // ✅ FIX: Use int for atomic operations (0=false, 1=true)
         private int _suppressEventsFlag = 0;
 
         private sealed class PendingChange
@@ -198,7 +196,6 @@ namespace DiskMountUtility.Application.FileWatcher
                     else if (existing.ChangeType == Application.Services.FileChangeType.Created &&
                              changeType == Application.Services.FileChangeType.Modified)
                     {
-                        // keep Created
                     }
                     else if (changeType == Application.Services.FileChangeType.Deleted)
                     {
@@ -226,7 +223,6 @@ namespace DiskMountUtility.Application.FileWatcher
 
         private async Task ScheduleProcessPendingChangesAsync()
         {
-            // ✅ FIX: Don't skip if already processing, queue will handle it
             if (!await _processingLock.WaitAsync(0).ConfigureAwait(false))
             {
                 Log("⏳ Processing already in progress, will process in next cycle");
@@ -259,16 +255,16 @@ namespace DiskMountUtility.Application.FileWatcher
                         ready.Add(kv);
                 }
 
-                if (ready.Count == 0) return;
+                if (ready.Count == 0)
+                    return;
 
                 foreach (var kv in ready)
                     _pendingChanges.TryRemove(kv.Key, out _);
 
-                // ✅ FIX: Process with suppression to avoid feedback loops
                 Interlocked.Exchange(ref _suppressEventsFlag, 1);
                 try
                 {
-                    foreach (var kv in ready)
+                    var tasks = ready.Select(async kv =>
                     {
                         var path = kv.Key;
                         var pending = kv.Value;
@@ -283,12 +279,13 @@ namespace DiskMountUtility.Application.FileWatcher
                         {
                             Log($"❌ Sync error for {Path.GetFileName(path)}: {ex.Message}");
                         }
-                    }
+                    });
+
+                    await Task.WhenAll(tasks).ConfigureAwait(false);
                 }
                 finally
                 {
-                    // ✅ FIX: Wait before re-enabling events to let writes settle
-                    await Task.Delay(1000);
+                    await Task.Delay(500);
                     Interlocked.Exchange(ref _suppressEventsFlag, 0);
                 }
             }
@@ -347,7 +344,6 @@ namespace DiskMountUtility.Application.FileWatcher
             }
             catch
             {
-                // ignore
             }
 
             return false;

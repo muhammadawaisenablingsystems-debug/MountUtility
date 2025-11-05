@@ -11,7 +11,7 @@
 @inject DiskManagementService DiskService
 @inject NavigationManager Navigation
 @inject IJSRuntime JS
-@implements IDisposable
+@implements IAsyncDisposable
 
 <PageTitle>File Explorer - @(mountedDisk?.Name ?? "No Disk")</PageTitle>
 
@@ -43,7 +43,9 @@
                 <div class="actions">
                     <button type="button" class="btn btn-primary" @onclick="ShowUploadDialog">Upload File</button>
                     <button type="button" class="btn btn-secondary" @onclick="ShowCreateFolderDialog">New Folder</button>
-                    <button type="button" class="btn btn-info" @onclick="RefreshFiles">🔄 Refresh</button>
+                    <button type="button" class="btn btn-info" @onclick="RefreshFiles" disabled="@isRefreshing">
+                        🔄 @(isRefreshing ? "Refreshing..." : "Refresh")
+                    </button>
                 </div>
             </div>
 
@@ -196,6 +198,7 @@
     private bool showUploadDialog = false;
     private bool showCreateFolderDialog = false;
     private bool isProcessing = false;
+    private bool isRefreshing = false;
     private string errorMessage = string.Empty;
 
     private string newFolderName = string.Empty;
@@ -209,7 +212,6 @@
     private string previewType = string.Empty;
     private string previewContentType = string.Empty;
 
-    // ✅ NEW: Real-time update subscription
     private string? _subscriptionId;
 
     protected override async Task OnInitializedAsync()
@@ -217,14 +219,28 @@
         await LoadMountedDisk();
         await LoadFiles();
 
-        // ✅ NEW: Subscribe to file changes
         _subscriptionId = DiskService.SubscribeToFileChanges(async () =>
         {
             Console.WriteLine("📢 File change detected, refreshing UI...");
             await InvokeAsync(async () =>
             {
-                await LoadFiles();
+                isRefreshing = true;
                 StateHasChanged();
+
+                try
+                {
+                    await LoadFiles();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error loading files: {ex.Message}");
+                    errorMessage = "Failed to refresh files";
+                }
+                finally
+                {
+                    isRefreshing = false;
+                    StateHasChanged();
+                }
             });
         });
     }
@@ -242,13 +258,20 @@
 
     private async Task RefreshFiles()
     {
-        await LoadFiles();
+        isRefreshing = true;
+        try
+        {
+            await LoadFiles();
+        }
+        finally
+        {
+            isRefreshing = false;
+        }
         StateHasChanged();
     }
 
     private void ShowUploadDialog()
     {
-        Console.WriteLine("Upload File button clicked!");
         selectedFile = null;
         selectedFileName = string.Empty;
         errorMessage = string.Empty;
@@ -276,7 +299,6 @@
     {
         selectedFile = e.File;
         selectedFileName = selectedFile.Name;
-        Console.WriteLine($"File selected: {selectedFileName}");
         StateHasChanged();
     }
 
@@ -487,6 +509,7 @@
     {
         currentPath = path;
         await LoadFiles();
+        StateHasChanged();
     }
 
     private void ClosePreview()
@@ -516,12 +539,12 @@
 
     private void NavigateBack() => Navigation.NavigateTo("/");
 
-    public void Dispose()
+    async ValueTask IAsyncDisposable.DisposeAsync()
     {
-        // ✅ NEW: Unsubscribe on disposal
         if (!string.IsNullOrEmpty(_subscriptionId))
         {
             DiskService.UnsubscribeFromFileChanges(_subscriptionId);
         }
+        await ValueTask.CompletedTask;
     }
 }

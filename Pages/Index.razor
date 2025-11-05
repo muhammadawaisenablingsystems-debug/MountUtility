@@ -7,7 +7,7 @@
 @inject DiskManagementService DiskService
 @inject NavigationManager Navigation
 @inject ProtectedSessionStorage SessionStorage
-@implements IDisposable
+@implements IAsyncDisposable
 
 <PageTitle>Disk Mount Utility</PageTitle>
 
@@ -255,7 +255,6 @@
     private string vaultPassword = string.Empty;
     private bool _initialized = false;
 
-    // ✅ NEW: Store mounted disk ID in session
     private Guid? _mountedDiskId;
     private string? _mountedDiskPassword;
 
@@ -274,7 +273,6 @@
                     VaultKeyManager.Initialize(vaultPass.Value);
                     isVaultUnlocked = true;
 
-                    // ✅ NEW: Restore mounted disk if any
                     var mountedDiskIdResult = await SessionStorage.GetAsync<Guid?>("MountedDiskId");
                     var mountedPasswordResult = await SessionStorage.GetAsync<string>("MountedDiskPassword");
 
@@ -284,7 +282,6 @@
                         _mountedDiskId = mountedDiskIdResult.Value;
                         _mountedDiskPassword = mountedPasswordResult.Value;
 
-                        // Check current backend state
                         mountedDisk = await DiskService.GetMountedDiskInfoAsync();
 
                         if (mountedDisk == null)
@@ -299,12 +296,17 @@
                             if (success)
                             {
                                 await LoadDisks();
-                                Console.WriteLine("✅ Disk restored successfully after reload");
+                                Console.WriteLine("✅ Disk restored successfully");
+                            }
+                            else
+                            {
+                                await SessionStorage.DeleteAsync("MountedDiskId");
+                                await SessionStorage.DeleteAsync("MountedDiskPassword");
                             }
                         }
                         else
                         {
-                            Console.WriteLine("✅ Disk already mounted, skipping re-mount after render");
+                            Console.WriteLine("✅ Disk already mounted, skipping re-mount");
                         }
                     }
 
@@ -324,9 +326,16 @@
 
     private async Task LoadDisks()
     {
-        disks = await DiskService.GetAllDisksAsync();
-        mountedDisk = await DiskService.GetMountedDiskInfoAsync();
-        StateHasChanged();
+        try
+        {
+            disks = await DiskService.GetAllDisksAsync();
+            mountedDisk = await DiskService.GetMountedDiskInfoAsync();
+        }
+        catch (Exception ex)
+        {
+            errorMessage = $"Failed to load disks: {ex.Message}";
+            Console.WriteLine($"LoadDisks error: {ex.Message}");
+        }
     }
 
     private void ShowCreateDialog()
@@ -386,6 +395,7 @@
             await SessionStorage.SetAsync("VaultPassword", vaultPassword);
 
             await LoadDisks();
+            StateHasChanged();
         }
         catch (Exception ex)
         {
@@ -420,6 +430,7 @@
             await DiskService.CreateDiskAsync(request);
             await LoadDisks();
             CloseDialogs();
+            StateHasChanged();
         }
         catch (Exception ex)
         {
@@ -453,14 +464,12 @@
             var success = await DiskService.MountDiskAsync(request);
             if (success)
             {
-                // await DiskService.MountPhysicalAsync(selectedDiskId);
-
-                // ✅ NEW: Store mount info in session
                 await SessionStorage.SetAsync("MountedDiskId", selectedDiskId);
                 await SessionStorage.SetAsync("MountedDiskPassword", mountPassword);
 
                 await LoadDisks();
                 CloseDialogs();
+                StateHasChanged();
             }
             else
             {
@@ -486,11 +495,11 @@
             await DiskService.UnmountPhysicalAsync(mountedDisk.Id);
             await DiskService.UnmountDiskAsync(mountedDisk.Id);
 
-            // ✅ NEW: Clear session storage
             await SessionStorage.DeleteAsync("MountedDiskId");
             await SessionStorage.DeleteAsync("MountedDiskPassword");
 
             await LoadDisks();
+            StateHasChanged();
         }
         catch (Exception ex)
         {
@@ -537,6 +546,7 @@
             {
                 await LoadDisks();
                 CloseDialogs();
+                StateHasChanged();
             }
             else
             {
@@ -561,6 +571,7 @@
             {
                 await DiskService.DeleteDiskAsync(diskId);
                 await LoadDisks();
+                StateHasChanged();
             }
             catch (Exception ex)
             {
@@ -594,8 +605,8 @@
         return true;
     }
 
-    public void Dispose()
+    async ValueTask IAsyncDisposable.DisposeAsync()
     {
-        // Cleanup if needed
+        await ValueTask.CompletedTask;
     }
 }

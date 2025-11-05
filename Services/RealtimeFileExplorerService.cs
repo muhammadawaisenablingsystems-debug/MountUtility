@@ -7,19 +7,18 @@ namespace DiskMountUtility.Application.Services
 {
     public class RealtimeFileExplorerService : IDisposable
     {
-        private readonly ConcurrentDictionary<string, Action> _subscribers = new();
+        private readonly ConcurrentDictionary<string, Func<Task>> _subscribers = new();
         private Timer? _notificationTimer;
-        private bool _hasChanges;
+        private volatile bool _hasChanges;
         private readonly SemaphoreSlim _notifyLock = new(1, 1);
         private bool _disposed;
 
-        // debounce delay (ms)
         private const int DebounceMs = 500;
 
-        public string Subscribe(Action callback)
+        public string Subscribe(Func<Task> callback)
         {
             var subscriptionId = Guid.NewGuid().ToString();
-            _subscribers[subscriptionId] = callback;
+            _subscribers[subscriptionId] = callback ?? throw new ArgumentNullException(nameof(callback));
             Console.WriteLine($"📡 Client subscribed for file updates: {subscriptionId}");
             return subscriptionId;
         }
@@ -36,46 +35,42 @@ namespace DiskMountUtility.Application.Services
 
             _hasChanges = true;
 
-            // Ensure timer exists
             if (_notificationTimer == null)
             {
-                // create single timer instance; it will call NotifyAllSubscribersTimerCallback
-                _notificationTimer = new Timer(async _ => await NotifyAllSubscribersTimerCallback(), null, DebounceMs, Timeout.Infinite);
+                _notificationTimer = new Timer(
+                    async _ => await NotifyAllSubscribersAsync(),
+                    null,
+                    DebounceMs,
+                    Timeout.Infinite
+                );
             }
             else
             {
-                // reset debounce
                 try
                 {
                     _notificationTimer.Change(DebounceMs, Timeout.Infinite);
                 }
                 catch (ObjectDisposedException)
                 {
-                    // ignore if disposed during shutdown
                 }
             }
         }
 
-        private async Task NotifyAllSubscribersTimerCallback()
-        {
-            if (_disposed) return;
-
-            // Quick check
-            if (!_hasChanges) return;
-
-            await NotifyAllSubscribersAsync().ConfigureAwait(false);
-        }
-
         private async Task NotifyAllSubscribersAsync()
         {
-            if (_disposed) return;
+            if (_disposed || !_hasChanges)
+                return;
 
             await _notifyLock.WaitAsync().ConfigureAwait(false);
             try
             {
-                if (!_hasChanges) return;
+                if (!_hasChanges)
+                    return;
 
                 _hasChanges = false;
+
+                if (_subscribers.IsEmpty)
+                    return;
 
                 Console.WriteLine($"📢 Notifying {_subscribers.Count} subscribers of file changes");
 
@@ -85,8 +80,7 @@ namespace DiskMountUtility.Application.Services
                 {
                     try
                     {
-                        // run callbacks on threadpool so a slow client doesn't block others
-                        await Task.Run(() => callback.Invoke()).ConfigureAwait(false);
+                        await callback.Invoke().ConfigureAwait(false);
                     }
                     catch (Exception ex)
                     {
@@ -107,7 +101,9 @@ namespace DiskMountUtility.Application.Services
 
         public void Dispose()
         {
-            if (_disposed) return;
+            if (_disposed)
+                return;
+
             _disposed = true;
 
             try
@@ -116,7 +112,9 @@ namespace DiskMountUtility.Application.Services
                 _notificationTimer?.Dispose();
                 _notificationTimer = null;
             }
-            catch { /* ignore */ }
+            catch
+            {
+            }
 
             _subscribers.Clear();
             _notifyLock?.Dispose();

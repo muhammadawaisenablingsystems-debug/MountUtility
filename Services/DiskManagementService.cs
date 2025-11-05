@@ -15,8 +15,8 @@ namespace DiskMountUtility.Application.Services
         private readonly IDiskRepository _diskRepository;
         private readonly IDbContextFactory<AppDbContext> _dbContextFactory;
         private readonly VaultFileWatcherService _watcher;
-        private readonly RealtimeVaultSyncService _realtimeSync; // ✅ NEW
-        private readonly RealtimeFileExplorerService _realtimeUI; // ✅ NEW
+        private readonly RealtimeVaultSyncService _realtimeSync;
+        private readonly RealtimeFileExplorerService _realtimeUI;
 
         private const long MB = 1024 * 1024;
 
@@ -26,14 +26,14 @@ namespace DiskMountUtility.Application.Services
             IDbContextFactory<AppDbContext> dbContextFactory,
             VaultFileWatcherService watcher,
             RealtimeVaultSyncService realtimeSync,
-            RealtimeFileExplorerService realtimeUI) // ✅ NEW
+            RealtimeFileExplorerService realtimeUI)
         {
             _virtualDiskService = virtualDiskService;
             _diskRepository = diskRepository;
             _dbContextFactory = dbContextFactory;
             _watcher = watcher;
             _realtimeSync = realtimeSync;
-            _realtimeUI = realtimeUI; // ✅ NEW
+            _realtimeUI = realtimeUI;
 
             _watcher.FileAdded += HandleFileAdded;
             _watcher.FileUpdated += HandleFileUpdated;
@@ -43,12 +43,11 @@ namespace DiskMountUtility.Application.Services
             _watcher.OnChangeDetected = async (path, changeType, oldPath) =>
             {
                 await _realtimeSync.SyncFileChangeAsync(path, changeType, oldPath);
-                _realtimeUI.NotifyFileChange(); // ✅ NEW: Notify UI
+                _realtimeUI.NotifyFileChange();
             };
         }
 
-        // ✅ NEW: UI Subscription methods
-        public string SubscribeToFileChanges(Action callback)
+        public string SubscribeToFileChanges(Func<Task> callback)
         {
             return _realtimeUI.Subscribe(callback);
         }
@@ -105,13 +104,6 @@ namespace DiskMountUtility.Application.Services
 
             string? vaultPath = await _virtualDiskService.GetMountedPathAsync(request.DiskId);
 
-            //if (string.IsNullOrEmpty(vaultPath))
-            //{
-            //    Console.WriteLine("⚠️ Mount succeeded but no vault path available");
-            //    return false;
-            //}
-
-            // ✅ NEW: Initialize realtime sync BEFORE starting watcher
             _realtimeSync.Initialize(request.DiskId, request.Password, vaultPath);
 
             _watcher.Initialize(vaultPath);
