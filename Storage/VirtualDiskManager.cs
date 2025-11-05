@@ -17,9 +17,10 @@ namespace DiskMountUtility.Infrastructure.Storage
         private VirtualDisk? _mountedDisk;
         private Dictionary<string, DiskFile> _mountedDiskFiles = new();
         public string? MountedVaultPath { get; private set; }
-
-        // ✅ ONLY CHANGE: Cache password during mount
         private string? _mountedDiskPassword;
+
+        // ✅ Track VHDX handle to properly dispose
+        private SafeFileHandle? _activeVhdxHandle;
 
         public VirtualDiskManager(ICryptographyService cryptographyService, IDiskRepository diskRepository)
         {
@@ -31,12 +32,95 @@ namespace DiskMountUtility.Infrastructure.Storage
 
         public async Task InitializeAsync()
         {
-            var mountedDisks = await _diskRepository.GetByStatusAsync(DiskStatus.Mounted);
+            // ✅ FIX: Clean up orphaned VHDXs and reset disk states
+            var vaultBaseDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "DiskMountUtility", "MountedVHDs");
 
+            if (Directory.Exists(vaultBaseDir))
+            {
+                try
+                {
+                    // Detach any VHDXs that might be attached
+                    foreach (var vhdxPath in Directory.GetFiles(vaultBaseDir, "*.vhdx"))
+                    {
+                        await DetachVhdxSilently(vhdxPath);
+                    }
+
+                    // Clean up all VHDX-related files
+                    foreach (var file in Directory.GetFiles(vaultBaseDir))
+                    {
+                        try
+                        {
+                            File.Delete(file);
+                            Console.WriteLine($"🧹 Cleaned up: {Path.GetFileName(file)}");
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"⚠️ Could not delete {file}: {ex.Message}");
+                        }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"⚠️ Cleanup warning: {ex.Message}");
+                }
+            }
+
+            // Reset all mounted disks to unmounted state
+            var mountedDisks = await _diskRepository.GetByStatusAsync(DiskStatus.Mounted);
             foreach (var disk in mountedDisks)
             {
                 disk.Status = DiskStatus.Created;
+                disk.TempMountPath = null;
                 await _diskRepository.UpdateAsync(disk);
+            }
+        }
+
+        private async Task DetachVhdxSilently(string vhdxPath)
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(vhdxPath) || !File.Exists(vhdxPath))
+                {
+                    Console.WriteLine($"⚠️ Invalid or missing VHDX file: {vhdxPath}");
+                    return;
+                }
+
+                var tempDir = Path.GetDirectoryName(vhdxPath) ?? Path.GetTempPath();
+                var tempScriptPath = Path.Combine(tempDir, $"detach_{Guid.NewGuid():N}.txt");
+
+                var detachScript = $@"
+            select vdisk file=""{vhdxPath}""
+            detach vdisk
+            exit
+        ".Trim();
+
+                await File.WriteAllTextAsync(tempScriptPath, detachScript);
+
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "diskpart.exe",
+                    Arguments = $"/s \"{tempScriptPath}\"",
+                    UseShellExecute = true,              // must be true for runas
+                    CreateNoWindow = true,
+                    WindowStyle = ProcessWindowStyle.Hidden,
+                    Verb = "runas"                       // 👈 triggers admin elevation prompt
+                };
+
+                using (var proc = Process.Start(psi))
+                {
+                    if (proc != null)
+                        await proc.WaitForExitAsync();
+                }
+
+                try { File.Delete(tempScriptPath); } catch { }
+
+                Console.WriteLine($"✅ Detached (elevated) VHDX: {Path.GetFileName(vhdxPath)}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ Silent detach failed for {Path.GetFileName(vhdxPath)}: {ex.Message}");
             }
         }
 
@@ -45,11 +129,9 @@ namespace DiskMountUtility.Infrastructure.Storage
             var diskId = Guid.NewGuid();
             var filePath = Path.Combine(_diskStoragePath, $"{diskId}.vdisk");
 
-            // Step 0: Generate a single salt for both password hash and key derivation
             var salt = RandomNumberGenerator.GetBytes(32);
             var passwordHash = _cryptographyService.HashPassword(password, salt);
 
-            // Step 1: Create disk entity
             var disk = new VirtualDisk
             {
                 Id = diskId,
@@ -63,11 +145,9 @@ namespace DiskMountUtility.Infrastructure.Storage
                 PasswordHash = passwordHash
             };
 
-            // Step 2: Prepare initial empty disk content
             var initialData = new { files = new List<DiskFile>() };
             var jsonData = JsonSerializer.SerializeToUtf8Bytes(initialData);
 
-            // Step 3: Encrypt disk content and generate all cryptographic material using the SAME salt
             var encryptedData = _cryptographyService.EncryptData(
                 jsonData,
                 password,
@@ -75,25 +155,23 @@ namespace DiskMountUtility.Infrastructure.Storage
                 out var kyberPublicKey,
                 out var kyberSecretKeyEncrypted,
                 out var diskNonce,
-                salt, // ✅ pass the SAME salt, do NOT let EncryptData generate a new one
+                salt,
                 out var kyberSecretKeyNonce
             );
 
-            // Step 4: Build encryption metadata
             var metadata = new EncryptionMetadata
             {
                 KyberCiphertext = kyberCiphertext,
                 KyberPublicKey = kyberPublicKey,
                 KyberSecretKeyEncrypted = kyberSecretKeyEncrypted,
                 Nonce = diskNonce,
-                Salt = salt, // ✅ same salt used for password hash
+                Salt = salt,
                 KyberSecretKeyNonce = kyberSecretKeyNonce,
                 VirtualDiskId = disk.Id
             };
 
             disk.Metadata = metadata;
 
-            // Step 5: Write disk data to file
             var diskData = new
             {
                 metadata = new
@@ -110,7 +188,6 @@ namespace DiskMountUtility.Infrastructure.Storage
 
             await File.WriteAllTextAsync(filePath, JsonSerializer.Serialize(diskData));
 
-            // Step 6: Save to DB
             return await _diskRepository.CreateAsync(disk);
         }
 
@@ -121,15 +198,9 @@ namespace DiskMountUtility.Infrastructure.Storage
                 if (_mountedDisk != null)
                 {
                     Console.WriteLine($"Switching mounted disk from '{_mountedDisk.Name}' to new disk...");
-
-                    _mountedDisk.Status = DiskStatus.Unmounted;
-                    await _diskRepository.UpdateAsync(_mountedDisk);
-
-                    await UnmountDiskAsync(diskId);
-                    _mountedDisk = null;
+                    await UnmountDiskAsync(_mountedDisk.Id);
                 }
 
-                // 1️ Get disk info
                 var disk = await _diskRepository.GetByIdAsync(diskId);
                 if (disk == null || !File.Exists(disk.FilePath))
                 {
@@ -137,7 +208,6 @@ namespace DiskMountUtility.Infrastructure.Storage
                     return false;
                 }
 
-                // 2️ Fetch associated encryption metadata from DB
                 var metadata = await _diskRepository.GetMetadataByDiskIdAsync(diskId);
                 if (metadata == null)
                 {
@@ -145,21 +215,18 @@ namespace DiskMountUtility.Infrastructure.Storage
                     return false;
                 }
 
-                // 3️ Verify password using stored salt
                 if (!_cryptographyService.VerifyPassword(password, disk.PasswordHash, metadata.Salt))
                 {
                     Console.WriteLine("Password verification failed.");
                     return false;
                 }
 
-                // 4️ Read the encrypted content from disk file
                 var jsonContent = await File.ReadAllTextAsync(disk.FilePath);
                 var diskData = JsonSerializer.Deserialize<JsonDocument>(jsonContent);
                 var encryptedContent = Convert.FromBase64String(
                     diskData!.RootElement.GetProperty("encryptedContent").GetString()!
                 );
 
-                // 5️ Decrypt using metadata (not the file)
                 var decryptedData = _cryptographyService.DecryptData(
                     encryptedContent,
                     password,
@@ -171,7 +238,6 @@ namespace DiskMountUtility.Infrastructure.Storage
                     metadata.Salt
                 );
 
-                // 6️ Deserialize back to in-memory files
                 var diskContent = JsonSerializer.Deserialize<JsonDocument>(decryptedData);
                 var files = diskContent!.RootElement.GetProperty("files");
 
@@ -185,10 +251,7 @@ namespace DiskMountUtility.Infrastructure.Storage
                 disk.Status = DiskStatus.Mounted;
                 disk.LastMountedAt = DateTime.UtcNow;
                 _mountedDisk = disk;
-                _mountedDiskPassword = password; // Store password for save operations
-
-                // Logical (in-memory) mount does not expose a filesystem path; clear any previous mounted vault path
-                //MountedVaultPath = null;
+                _mountedDiskPassword = password;
 
                 await _diskRepository.UpdateAsync(disk);
 
@@ -209,16 +272,18 @@ namespace DiskMountUtility.Infrastructure.Storage
                 return false;
             }
 
+            // ✅ FIX: Ensure physical drive is unmounted first
+            if (!string.IsNullOrEmpty(_mountedDisk.TempMountPath))
+            {
+                await UnmountPhysicalDriveAsync(diskId);
+            }
+
             _mountedDisk.Status = DiskStatus.Unmounted;
             await _diskRepository.UpdateAsync(_mountedDisk);
 
             _mountedDisk = null;
             _mountedDiskFiles.Clear();
-
-            //  ONLY CHANGE: Clear cached password
             _mountedDiskPassword = null;
-
-            // Clear mounted vault path as well (if any)
             MountedVaultPath = null;
 
             return true;
@@ -471,7 +536,6 @@ namespace DiskMountUtility.Infrastructure.Storage
                 return;
             }
 
-            // ✅ Get metadata from database
             var metadata = await _diskRepository.GetMetadataByDiskIdAsync(_mountedDisk.Id);
             if (metadata == null)
             {
@@ -482,7 +546,6 @@ namespace DiskMountUtility.Infrastructure.Storage
             var dataToEncrypt = new { files = _mountedDiskFiles.Values.ToList() };
             var jsonData = JsonSerializer.SerializeToUtf8Bytes(dataToEncrypt);
 
-            // ✅ ONLY CHANGE: Use cached password instead of empty string
             var password = _mountedDiskPassword ?? string.Empty;
 
             var encryptedData = _cryptographyService.EncryptData(
@@ -492,17 +555,15 @@ namespace DiskMountUtility.Infrastructure.Storage
                 out var kyberPublicKey,
                 out var kyberSecretKey,
                 out var nonce,
-                metadata.Salt,  // ✅ Use existing salt from metadata
+                metadata.Salt,
                 out var kyberSecretKeyNonce
             );
 
-            // ✅ Update metadata in database
             metadata.KyberCiphertext = kyberCiphertext;
             metadata.KyberPublicKey = kyberPublicKey;
             metadata.KyberSecretKeyEncrypted = kyberSecretKey;
             metadata.Nonce = nonce;
             metadata.KyberSecretKeyNonce = kyberSecretKeyNonce;
-            // Note: Salt remains unchanged
 
             var updatedDiskData = new
             {
@@ -543,7 +604,29 @@ namespace DiskMountUtility.Infrastructure.Storage
                 return false;
             }
 
-            // 🔹 Find an available drive letter dynamically
+            // ✅ FIX: Clean up any existing VHDX for this disk first
+            var vaultBaseDir = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                "DiskMountUtility", "MountedVHDs");
+            Directory.CreateDirectory(vaultBaseDir);
+
+            var tempVhdxPath = Path.Combine(vaultBaseDir, $"{disk.Id}.vhdx");
+
+            if (File.Exists(tempVhdxPath))
+            {
+                await DetachVhdxSilently(tempVhdxPath);
+                try
+                {
+                    File.Delete(tempVhdxPath);
+                    Console.WriteLine($"🧹 Deleted existing VHDX: {tempVhdxPath}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"⚠️ Could not delete existing VHDX: {ex.Message}");
+                    return false;
+                }
+            }
+
             char driveLetter = GetAvailableDriveLetter();
             if (driveLetter == '\0')
             {
@@ -551,16 +634,8 @@ namespace DiskMountUtility.Infrastructure.Storage
                 return false;
             }
 
-            // 🔹 Use a persistent location for VHDs instead of Temp (avoid SYSTEM access issues)
-            var vaultBaseDir = Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "DiskMountUtility", "MountedVHDs");
-            Directory.CreateDirectory(vaultBaseDir);
-
-            var tempVhdxPath = Path.Combine(vaultBaseDir, $"{disk.Id}.vhdx");
             var tempExtractFolder = Path.Combine(vaultBaseDir, $"{disk.Id}_extracted");
             var tempScriptPath = Path.Combine(vaultBaseDir, $"{disk.Id}_diskpart.txt");
-            var batchFile = Path.Combine(vaultBaseDir, $"{disk.Id}_run_diskpart.bat");
             var logPath = Path.Combine(vaultBaseDir, $"{disk.Id}_diskpart.log");
 
             if (Directory.Exists(tempExtractFolder))
@@ -569,7 +644,6 @@ namespace DiskMountUtility.Infrastructure.Storage
 
             try
             {
-                // 1️⃣ Extract in-memory decrypted files into tempExtractFolder
                 foreach (var kv in _mountedDiskFiles)
                 {
                     var file = kv.Value;
@@ -588,57 +662,39 @@ namespace DiskMountUtility.Infrastructure.Storage
                     }
                 }
 
-                if (File.Exists(tempVhdxPath))
-                {
-                    try
-                    {
-                        Console.WriteLine($"🧹 Deleting existing VHDX: {tempVhdxPath}");
-                        File.Delete(tempVhdxPath);
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"⚠️ Could not delete existing VHDX ({tempVhdxPath}): {ex.Message}");
-                        return false;
-                    }
-                }
+                var sizeMb = Math.Max((disk.SizeInBytes + (1024 * 1024 - 1)) / (1024 * 1024), 50);
 
-                // 2️⃣ Create DiskPart script (more reliable with re-select)
-                var sizeMb = (disk.SizeInBytes + (1024 * 1024 - 1)) / (1024 * 1024);
-                var diskpartScript = $@"
-                    create vdisk file=""{tempVhdxPath}"" maximum={sizeMb} type=expandable
-                    select vdisk file=""{tempVhdxPath}"" 
-                    attach vdisk
-                    select vdisk file=""{tempVhdxPath}"" 
-                    create partition primary
-                    format fs=ntfs quick label={disk.Name}
-                    assign letter={driveLetter}
-                    exit
-                    ".Trim();
+                // ✅ FIX: Improved DiskPart script with better error handling
+                var diskpartScript = $@"create vdisk file=""{tempVhdxPath}"" maximum={sizeMb} type=expandable
+select vdisk file=""{tempVhdxPath}""
+attach vdisk
+select vdisk file=""{tempVhdxPath}""
+create partition primary
+format fs=ntfs quick label=""{disk.Name}""
+assign letter={driveLetter}
+exit";
 
                 await File.WriteAllTextAsync(tempScriptPath, diskpartScript);
 
-                // 3️⃣ Create batch file that logs DiskPart output
-                var batchContent = $@"
-                    @echo off
-                    echo Running DiskPart as admin...
-                    diskpart /s ""{tempScriptPath}"" > ""{logPath}"" 2>&1
-                    exit /b %errorlevel%
-                    ";
-                await File.WriteAllTextAsync(batchFile, batchContent);
-
-                var psi = new System.Diagnostics.ProcessStartInfo
+                // ✅ FIX: Run DiskPart with proper elevation and error capture
+                var psi = new ProcessStartInfo
                 {
-                    FileName = batchFile,
+                    FileName = "diskpart.exe",
+                    Arguments = $"/s \"{tempScriptPath}\"",
                     UseShellExecute = true,
-                    Verb = "runas", // triggers UAC prompt
+                    Verb = "runas",
                     CreateNoWindow = true,
                     WindowStyle = ProcessWindowStyle.Hidden
                 };
 
                 try
                 {
-                    var proc = System.Diagnostics.Process.Start(psi);
-                    proc?.WaitForExit();
+                    var proc = Process.Start(psi);
+                    if (proc != null)
+                    {
+                        await proc.WaitForExitAsync();
+                        proc.Dispose();
+                    }
                 }
                 catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223)
                 {
@@ -646,47 +702,27 @@ namespace DiskMountUtility.Infrastructure.Storage
                     return false;
                 }
 
-                // 4️⃣ Check if drive appeared
                 var driveRoot = $"{driveLetter}:\\";
-                var timeout = DateTime.UtcNow.AddSeconds(10);
+                var timeout = DateTime.UtcNow.AddSeconds(15);
+
                 while (!Directory.Exists(driveRoot) && DateTime.UtcNow < timeout)
                     await Task.Delay(500);
 
                 if (!Directory.Exists(driveRoot))
                 {
                     Console.WriteLine($"❌ Drive {driveRoot} not available after attach.");
-                    if (File.Exists(logPath))
-                    {
-                        Console.WriteLine("📜 DiskPart log output:");
-                        Console.WriteLine(await File.ReadAllTextAsync(logPath));
-                    }
                     return false;
                 }
 
                 Console.WriteLine($"✅ Drive {driveRoot} ready — copying decrypted contents...");
 
-                // 5️⃣ Copy extracted files into the new drive
                 CopyDirectory(tempExtractFolder, driveRoot);
 
-                // 6️⃣ Test write access
-                try
-                {
-                    var testFile = Path.Combine(driveRoot, "test.txt");
-                    await File.WriteAllTextAsync(testFile, "Vault mount test OK");
-                    Console.WriteLine($"✅ Test file created at {testFile}");
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"⚠️ Could not write test file: {ex.Message}");
-                }
-
-                // 7️⃣ Update DB
                 disk.TempMountPath = tempVhdxPath;
                 disk.Status = DiskStatus.Mounted;
                 disk.LastMountedAt = DateTime.UtcNow;
                 await _diskRepository.UpdateAsync(disk);
 
-                // Set mounted vault path so FileWatcher or other components can find the drive root
                 MountedVaultPath = driveRoot;
 
                 Console.WriteLine($"✅ Vault mounted as physical drive {driveLetter}:\\");
@@ -695,11 +731,6 @@ namespace DiskMountUtility.Infrastructure.Storage
             catch (Exception ex)
             {
                 Console.WriteLine($"❌ MountAsPhysicalDriveAsync failed: {ex}");
-                if (File.Exists(logPath))
-                {
-                    Console.WriteLine("📜 DiskPart log output:");
-                    Console.WriteLine(await File.ReadAllTextAsync(logPath));
-                }
                 return false;
             }
             finally
@@ -708,13 +739,11 @@ namespace DiskMountUtility.Infrastructure.Storage
                 {
                     if (Directory.Exists(tempExtractFolder))
                         Directory.Delete(tempExtractFolder, recursive: true);
-                    // Don’t delete the log or VHD yet — useful for inspection
                 }
-                catch { /* ignore cleanup errors */ }
+                catch { }
             }
         }
 
-        // helper to copy directories (preserve structure)
         private static void CopyDirectory(string sourceDir, string destinationDir)
         {
             foreach (var dirPath in Directory.GetDirectories(sourceDir, "*", SearchOption.AllDirectories))
@@ -741,59 +770,58 @@ namespace DiskMountUtility.Infrastructure.Storage
                 }
 
                 var vhdxPath = disk.TempMountPath;
+
+                // ✅ FIX: Dispose handle before detach
+                if (_activeVhdxHandle != null && !_activeVhdxHandle.IsInvalid)
+                {
+                    _activeVhdxHandle.Dispose();
+                    _activeVhdxHandle = null;
+                }
+
+                MountedVaultPath = null;
+
                 if (!File.Exists(vhdxPath))
                 {
                     Console.WriteLine($"⚠️ VHDX file not found: {vhdxPath}");
-                    return false;
+                    disk.Status = DiskStatus.Unmounted;
+                    disk.TempMountPath = null;
+                    await _diskRepository.UpdateAsync(disk);
+                    return true;
                 }
 
                 Console.WriteLine($"🔧 Detaching virtual disk: {vhdxPath}");
 
-                // Create a temporary diskpart script file
-                var tempDir = Path.Combine(Path.GetTempPath(), "DiskMountUtility", "VhdxMounts");
-                Directory.CreateDirectory(tempDir);
-                var tempScriptPath = Path.Combine(tempDir, $"{disk.Id}_detach.txt");
+                await DetachVhdxSilently(vhdxPath);
 
-                var detachScript = $@"
-                    select vdisk file=""{vhdxPath}""
-                    detach vdisk
-                    exit
-                    ".Trim();
+                // ✅ FIX: Wait for file to be unlocked
+                await Task.Delay(1000);
 
-                await File.WriteAllTextAsync(tempScriptPath, detachScript);
-
-                var psi = new System.Diagnostics.ProcessStartInfo
+                // Try to delete VHDX file
+                int retries = 3;
+                for (int i = 0; i < retries; i++)
                 {
-                    FileName = "diskpart.exe",
-                    Arguments = $"/s \"{tempScriptPath}\"",
-                    UseShellExecute = true,
-                    Verb = "runas", // triggers elevation (needed)
-                    CreateNoWindow = true,
-                    WindowStyle = ProcessWindowStyle.Hidden
-                };
+                    try
+                    {
+                        if (File.Exists(vhdxPath))
+                        {
+                            File.Delete(vhdxPath);
+                            Console.WriteLine($"🧹 Deleted VHDX: {Path.GetFileName(vhdxPath)}");
+                        }
+                        break;
+                    }
+                    catch (IOException) when (i < retries - 1)
+                    {
+                        Console.WriteLine($"⏳ VHDX locked, retrying... ({i + 1}/{retries})");
+                        await Task.Delay(500);
+                    }
+                }
 
-                var proc = System.Diagnostics.Process.Start(psi);
-                proc?.WaitForExit();
-
-                // Give the OS a moment to clean up
-                await Task.Delay(300);
-
-                // Update DB and clean up
                 disk.Status = DiskStatus.Unmounted;
                 disk.TempMountPath = null;
-                disk.LastMountedAt = DateTime.UtcNow;
                 await _diskRepository.UpdateAsync(disk);
 
-                // Clear the mounted vault path so FileWatcher / other components don't refer to stale path
-                MountedVaultPath = null;
-
-                Console.WriteLine($"✅ Successfully detached VHDX {vhdxPath}");
+                Console.WriteLine($"✅ Successfully unmounted physical drive");
                 return true;
-            }
-            catch (System.ComponentModel.Win32Exception ex) when (ex.NativeErrorCode == 1223)
-            {
-                Console.WriteLine("⚠️ User denied elevation. Unmount aborted.");
-                return false;
             }
             catch (Exception ex)
             {
@@ -804,8 +832,6 @@ namespace DiskMountUtility.Infrastructure.Storage
 
         public Task<string?> GetMountedPathAsync(Guid diskId)
         {
-            // Prefer explicit physically-mounted path (MountedVaultPath).
-            // Fall back to the disk.TempMountPath if present.
             if (_mountedDisk != null && _mountedDisk.Id == diskId)
             {
                 if (!string.IsNullOrEmpty(MountedVaultPath))
@@ -819,40 +845,30 @@ namespace DiskMountUtility.Infrastructure.Storage
 
         private static char GetAvailableDriveLetter()
         {
-            // Collect currently used drive letters from mounted drives
             var used = DriveInfo.GetDrives()
                 .Select(d => char.ToUpperInvariant(d.Name[0]))
                 .ToHashSet();
 
-            // 🔹 Also include reserved drive letters from the registry (MountedDevices)
-            try
-            {
-                using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SYSTEM\MountedDevices");
-                if (key != null)
-                {
-                    foreach (var name in key.GetValueNames())
-                    {
-                        if (name.StartsWith(@"\DosDevices\", StringComparison.OrdinalIgnoreCase) &&
-                            name.Length == 13)
-                        {
-                            char letter = char.ToUpperInvariant(name[11]);
-                            used.Add(letter);
-                        }
-                    }
-                }
-            }
-            catch
-            {
-                // ignore registry read errors
-            }
-
-            // 🔹 Scan from Z → D (avoid C and system reserved)
+            // ✅ FIX: Don't rely on registry, just scan actual drives
             for (char letter = 'Z'; letter >= 'D'; letter--)
             {
                 if (!used.Contains(letter))
                 {
-                    Console.WriteLine($"✅ Selected available drive letter: {letter}");
-                    return letter;
+                    var testPath = $"{letter}:\\";
+                    try
+                    {
+                        if (!Directory.Exists(testPath))
+                        {
+                            Console.WriteLine($"✅ Selected available drive letter: {letter}");
+                            return letter;
+                        }
+                    }
+                    catch
+                    {
+                        // Letter might be available
+                        Console.WriteLine($"✅ Selected available drive letter: {letter}");
+                        return letter;
+                    }
                 }
             }
 
@@ -860,9 +876,6 @@ namespace DiskMountUtility.Infrastructure.Storage
             return '\0';
         }
 
-        // -------------------------------------------------------------------------
-        // P/Invoke and struct definitions
-        // -------------------------------------------------------------------------
         [Flags]
         private enum VIRTUAL_DISK_ACCESS_MASK : uint
         {
