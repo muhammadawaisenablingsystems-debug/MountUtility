@@ -418,8 +418,16 @@
 
         try
         {
-            await DiskService.DeleteFileAsync(mountedDisk.Id, path);
-            await LoadFiles();
+            // Use RealtimeSync so deletion updates both vault and mounted drive (and suppresses watcher)
+            var success = await RealtimeSync.DeleteFileFromUiAsync(mountedDisk.Id, path);
+            if (success)
+            {
+                await LoadFiles();
+            }
+            else
+            {
+                errorMessage = "Failed to delete file from vault.";
+            }
         }
         catch (Exception ex)
         {

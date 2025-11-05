@@ -311,6 +311,65 @@ namespace MountUtility.Services
             return true;
         }
 
+        public async Task<bool> DeleteFileFromUiAsync(Guid diskId, string path)
+        {
+            // remove from vault first
+            var removedFromVault = await _virtualDiskService.DeleteFileAsync(diskId, path);
+            if (!removedFromVault)
+            {
+                Console.WriteLine($"⚠️ Delete from vault failed or not found: {path}");
+                // still attempt to remove physical file to keep mounted state consistent
+            }
+
+            if (_activeDiskId.HasValue && _activeDiskId.Value == diskId && !string.IsNullOrEmpty(_activeMountPath))
+            {
+                // build physical path
+                var rel = path.TrimStart('/');
+                var physicalFullPath = Path.Combine(_activeMountPath!, rel.Replace("/", Path.DirectorySeparatorChar.ToString()));
+
+                try
+                {
+                    // mark as recent operation to avoid reacting to watcher events
+                    MarkRecentWrite(physicalFullPath);
+
+                    if (_fileWatcher != null)
+                    {
+                        await _fileWatcher.RunWithoutRaisingEventsAsync(async () =>
+                        {
+                            if (File.Exists(physicalFullPath))
+                            {
+                                File.Delete(physicalFullPath);
+                            }
+                            else if (Directory.Exists(physicalFullPath))
+                            {
+                                Directory.Delete(physicalFullPath, recursive: true);
+                            }
+                            await Task.CompletedTask;
+                        }).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        if (File.Exists(physicalFullPath))
+                        {
+                            File.Delete(physicalFullPath);
+                        }
+                        else if (Directory.Exists(physicalFullPath))
+                        {
+                            Directory.Delete(physicalFullPath, recursive: true);
+                        }
+                    }
+
+                    Console.WriteLine($"✅ Removed physical path: {physicalFullPath}");
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"⚠️ Failed to remove physical path {physicalFullPath}: {ex.Message}");
+                }
+            }
+
+            return true;
+        }
+
         private (string dirPath, string fileName) SplitRelativeDirAndName(string fullPath)
         {
             var rel = GetRelativePath(fullPath, _activeMountPath!);
