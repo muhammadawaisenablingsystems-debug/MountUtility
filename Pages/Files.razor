@@ -7,10 +7,12 @@
 @using Microsoft.AspNetCore.Components.Web
 @using Microsoft.JSInterop
 @using Microsoft.AspNetCore.StaticFiles;
+@using MountUtility.Services
 @inject ProtectedSessionStorage SessionStorage
 @inject DiskManagementService DiskService
 @inject NavigationManager Navigation
 @inject IJSRuntime JS
+@inject RealtimeVaultSyncService RealtimeSync
 @implements IAsyncDisposable
 
 <PageTitle>File Explorer - @(mountedDisk?.Name ?? "No Disk")</PageTitle>
@@ -324,14 +326,8 @@
             await stream.CopyToAsync(ms);
             var fileBytes = ms.ToArray();
 
-            var request = new WriteFileRequest
-            {
-                Path = currentPath,
-                FileName = selectedFile.Name,
-                Content = fileBytes
-            };
-
-            var success = await DiskService.WriteFileAsync(mountedDisk.Id, request);
+            // Use realtime sync helper so vault is updated and mounted drive is updated immediately
+            var success = await RealtimeSync.PushFileFromUiAsync(mountedDisk.Id, currentPath, selectedFile.Name, fileBytes);
             if (success)
             {
                 await LoadFiles();

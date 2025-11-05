@@ -1,4 +1,5 @@
-﻿using DiskMountUtility.Core.Entities;
+﻿using DiskMountUtility.Application.FileWatcher;
+using DiskMountUtility.Core.Entities;
 using DiskMountUtility.Core.Interfaces;
 using System.Collections.Concurrent;
 
@@ -9,6 +10,7 @@ namespace MountUtility.Services
         private readonly ICryptographyService _cryptographyService;
         private readonly IDiskRepository _diskRepository;
         private readonly IVirtualDiskService _virtualDiskService;
+        private readonly VaultFileWatcherService? _fileWatcher;
         private readonly SemaphoreSlim _syncLock = new(1, 1);
 
         private Guid? _activeDiskId;
@@ -23,11 +25,13 @@ namespace MountUtility.Services
         public RealtimeVaultSyncService(
             ICryptographyService cryptographyService,
             IDiskRepository diskRepository,
-            IVirtualDiskService virtualDiskService)
+            IVirtualDiskService virtualDiskService,
+            VaultFileWatcherService? fileWatcher = null)
         {
             _cryptographyService = cryptographyService;
             _diskRepository = diskRepository;
             _virtualDiskService = virtualDiskService;
+            _fileWatcher = fileWatcher;
         }
 
         public void Initialize(Guid diskId, string password, string mountPath)
@@ -56,16 +60,14 @@ namespace MountUtility.Services
                 return;
             }
 
+            fullPath = Path.GetFullPath(fullPath);
+
             // Avoid processing changes we recently wrote ourselves
-            if (IsRecentlyWritten(fullPath) || oldPath != null && IsRecentlyWritten(oldPath))
+            if (IsRecentlyWritten(fullPath) || (oldPath != null && IsRecentlyWritten(oldPath)))
             {
-                if (DateTime.UtcNow - GetRecentWriteTime(fullPath) < TimeSpan.FromMilliseconds(RecentWriteWindowMs) ||
-                    oldPath != null && DateTime.UtcNow - GetRecentWriteTime(oldPath) < TimeSpan.FromMilliseconds(RecentWriteWindowMs))
-                {
-                    if (_isSyncing == false)
-                        Console.WriteLine($"🔕 Skipping recent self-write: {fullPath}");
-                    return;
-                }
+                if (_isSyncing == false)
+                    Console.WriteLine($"🔕 Skipping recent self-write: {fullPath}");
+                return;
             }
 
             await _syncLock.WaitAsync();
@@ -74,7 +76,7 @@ namespace MountUtility.Services
                 _isSyncing = true;
                 Console.WriteLine($"🔄 Syncing {changeType}: {Path.GetFileName(fullPath)}");
 
-                var disk = await _diskRepository.GetByIdAsync(_activeDiskId.Value);
+                var disk = await _disk_repository_GetByIdSafeAsync(_activeDiskId.Value);
                 if (disk == null)
                 {
                     Console.WriteLine("❌ Disk not found");
@@ -84,11 +86,57 @@ namespace MountUtility.Services
                 switch (changeType)
                 {
                     case FileChangeType.Created:
-                    case FileChangeType.Modified:
                         {
+                            // directory created?
+                            if (Directory.Exists(fullPath))
+                            {
+                                var dirRel = GetRelativePath(fullPath, _activeMountPath!);
+                                var created = await _virtualDiskService.CreateDirectoryAsync(_activeDiskId.Value, dirRel);
+                                Console.WriteLine(created ? $"✅ Created directory in vault: {dirRel}" : $"⚠️ Failed to create directory in vault: {dirRel}");
+                                return;
+                            }
+
+                            // file created
                             if (!File.Exists(fullPath))
                             {
-                                Console.WriteLine($"⚠️ File not found for {changeType}: {fullPath}");
+                                Console.WriteLine($"⚠️ File not found for Created: {fullPath}");
+                                return;
+                            }
+
+                            byte[] createdContent;
+                            try
+                            {
+                                createdContent = ReadFileWithRetry(fullPath);
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"⚠️ Could not read file {fullPath}: {ex.Message}");
+                                return;
+                            }
+
+                            var (createdDirPath, createdFileName) = SplitRelativeDirAndName(fullPath);
+                            var wroteCreated = await _virtualDiskService.WriteFileAsync(_activeDiskId.Value, createdDirPath, createdFileName, createdContent);
+                            if (!wroteCreated)
+                            {
+                                Console.WriteLine($"❌ Failed to persist {createdFileName} into vault.");
+                                return;
+                            }
+
+                            Console.WriteLine($"✅ Persisted {createdFileName} to vault (per-file).");
+                            break;
+                        }
+
+                    case FileChangeType.Modified:
+                        {
+                            if (Directory.Exists(fullPath))
+                            {
+                                // directory modified due to metadata - ignore
+                                return;
+                            }
+
+                            if (!File.Exists(fullPath))
+                            {
+                                Console.WriteLine($"⚠️ File not found for Modified: {fullPath}");
                                 return;
                             }
 
@@ -117,8 +165,9 @@ namespace MountUtility.Services
 
                     case FileChangeType.Deleted:
                         {
+                            // if a directory was deleted, DeleteFileAsync can handle directory entry if present
                             var rel = GetRelativePath(fullPath, _activeMountPath!);
-                            var deleted = await _virtualDiskService.DeleteFileAsync(_activeDiskId.Value, rel);
+                            var deleted = await _virtualDiskService.DeleteFileAsync(_active_disk_Id_or_throw(_activeDiskId.Value), rel);
                             if (deleted)
                                 Console.WriteLine($"✅ Deleted {rel} from vault.");
                             else
@@ -139,6 +188,15 @@ namespace MountUtility.Services
                             if (deleteOk)
                                 Console.WriteLine($"✅ Removed old path from vault: {oldRel}");
 
+                            // If new is directory
+                            if (Directory.Exists(fullPath))
+                            {
+                                var newDirRel = GetRelativePath(fullPath, _activeMountPath!);
+                                var created = await _virtualDiskService.CreateDirectoryAsync(_activeDiskId.Value, newDirRel);
+                                Console.WriteLine(created ? $"✅ Created directory in vault: {newDirRel}" : $"⚠️ Failed to create directory in vault: {newDirRel}");
+                                return;
+                            }
+
                             if (File.Exists(fullPath))
                             {
                                 byte[] content;
@@ -153,7 +211,7 @@ namespace MountUtility.Services
                                 }
 
                                 var (dirPath, fileName) = SplitRelativeDirAndName(fullPath);
-                                var wrote = await _virtualDiskService.WriteFileAsync(_activeDiskId.Value, dirPath, fileName, content);
+                                var wrote = await _virtualDisk_service_WriteFileAsyncWithChecks(_activeDiskId.Value, dirPath, fileName, content, fullPath);
                                 if (wrote)
                                     Console.WriteLine($"✅ Persisted renamed file to vault: {fileName}");
                                 else
@@ -175,6 +233,25 @@ namespace MountUtility.Services
             }
         }
 
+        // Helper wrapper: write to vault and mark the physical file as a recent self-write
+        private async Task<bool> _virtualDisk_service_WriteFileAsyncWithChecks(Guid diskId, string dirPath, string fileName, byte[] content, string physicalFullPath)
+        {
+            var ok = await _virtualDiskService.WriteFileAsync(diskId, dirPath, fileName, content);
+            if (!ok) return false;
+
+            // mark physical file (if exists) to avoid immediate watcher loop
+            try
+            {
+                if (File.Exists(physicalFullPath))
+                {
+                    MarkRecentWrite(physicalFullPath);
+                }
+            }
+            catch { }
+
+            return true;
+        }
+
         // Call this from the UI server side when the web UI updates a file inside the vault.
         // It will write the file into the encrypted vault and then push plaintext to the mounted drive if present.
         public async Task<bool> PushFileFromUiAsync(Guid diskId, string path, string fileName, byte[] content)
@@ -190,8 +267,13 @@ namespace MountUtility.Services
             // If mounted, write plaintext into mounted path so physical view is updated immediately.
             if (_activeDiskId.HasValue && _activeDiskId.Value == diskId && !string.IsNullOrEmpty(_activeMountPath))
             {
-                var rel = NormalizePath(Path.Combine(path, fileName).Replace("\\", "/"));
-                var physicalFullPath = Path.Combine(_activeMountPath!, rel.TrimStart('/').Replace("/", Path.DirectorySeparatorChar.ToString()));
+                string rel;
+                if (string.IsNullOrEmpty(path) || path == "/")
+                    rel = fileName;
+                else
+                    rel = $"{path.TrimStart('/').TrimEnd('/')}/{fileName}";
+
+                var physicalFullPath = Path.Combine(_activeMountPath!, rel.Replace("/", Path.DirectorySeparatorChar.ToString()));
 
                 try
                 {
@@ -202,9 +284,20 @@ namespace MountUtility.Services
                     if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                         Directory.CreateDirectory(dir);
 
-                    // Write plaintext to mounted drive
-                    await File.WriteAllBytesAsync(physicalFullPath, content);
-                    File.SetLastWriteTimeUtc(physicalFullPath, DateTime.UtcNow);
+                    if (_fileWatcher != null)
+                    {
+                        // suppress watcher events while writing the file to mounted drive
+                        await _fileWatcher.RunWithoutRaisingEventsAsync(async () =>
+                        {
+                            await File.WriteAllBytesAsync(physicalFullPath, content).ConfigureAwait(false);
+                            File.SetLastWriteTimeUtc(physicalFullPath, DateTime.UtcNow);
+                        }).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        await File.WriteAllBytesAsync(physicalFullPath, content).ConfigureAwait(false);
+                        File.SetLastWriteTimeUtc(physicalFullPath, DateTime.UtcNow);
+                    }
 
                     Console.WriteLine($"✅ Pushed plaintext {fileName} to mounted drive at {physicalFullPath}");
                 }
@@ -262,7 +355,6 @@ namespace MountUtility.Services
                     if (ShouldSkipSystemFile(dirInfo.Name))
                         continue;
 
-                    // FIX: Use overload that accepts int for basePathLength
                     var relativePath = GetRelativePath(dirPath, basePathLength);
 
                     files.Add(new DiskFile
@@ -287,7 +379,6 @@ namespace MountUtility.Services
                     if (ShouldSkipSystemFile(fileInfo.Name))
                         continue;
 
-                    // FIX: Use overload that accepts int for basePathLength
                     var relativePath = GetRelativePath(filePath, basePathLength);
                     byte[] content = Array.Empty<byte>();
 
@@ -347,15 +438,34 @@ namespace MountUtility.Services
 
         private string GetRelativePath(string fullPath, string baseMountPath)
         {
-            var basePathLength = baseMountPath.TrimEnd('\\', '/').Length;
-            var p = fullPath.Substring(Math.Min(basePathLength, fullPath.Length));
+            if (string.IsNullOrEmpty(fullPath) || string.IsNullOrEmpty(baseMountPath))
+                return "/";
+
+            var basePath = baseMountPath.TrimEnd('\\', '/');
+            if (!fullPath.StartsWith(basePath, StringComparison.OrdinalIgnoreCase))
+            {
+                // fallback: return a normalized path
+                var normalized = fullPath.Replace("\\", "/").TrimStart('/');
+                return "/" + normalized;
+            }
+
+            if (fullPath.Length <= basePath.Length)
+                return "/";
+
+            var p = fullPath.Substring(basePath.Length);
             var relativePath = p.TrimStart('\\', '/').Replace("\\", "/");
             return "/" + relativePath;
         }
 
         private string GetRelativePath(string fullPath, int basePathLength)
         {
-            var p = fullPath.Substring(Math.Min(basePathLength, fullPath.Length));
+            if (string.IsNullOrEmpty(fullPath) || basePathLength < 0)
+                return "/";
+
+            if (fullPath.Length <= basePathLength)
+                return "/";
+
+            var p = fullPath.Substring(basePathLength);
             var relativePath = p.TrimStart('\\', '/').Replace("\\", "/");
             return "/" + relativePath;
         }
@@ -408,13 +518,30 @@ namespace MountUtility.Services
 
         private bool IsRecentlyWritten(string fullPath)
         {
-            return _recentWrites.ContainsKey(fullPath);
+            if (string.IsNullOrEmpty(fullPath)) return false;
+            if (_recentWrites.TryGetValue(fullPath, out var dt))
+            {
+                return DateTime.UtcNow - dt < TimeSpan.FromMilliseconds(RecentWriteWindowMs);
+            }
+            return false;
         }
 
         private DateTime GetRecentWriteTime(string fullPath)
         {
             if (_recentWrites.TryGetValue(fullPath, out var dt)) return dt;
             return DateTime.MinValue;
+        }
+
+        // small helpers to avoid repetitive null checks
+        private async Task<VirtualDisk?> _disk_repository_GetByIdSafeAsync(Guid id)
+        {
+            try { return await _diskRepository.GetByIdAsync(id); }
+            catch { return null; }
+        }
+
+        private Guid _active_disk_Id_or_throw(Guid id)
+        {
+            return id;
         }
     }
 

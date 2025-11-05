@@ -150,6 +150,40 @@ namespace DiskMountUtility.Application.FileWatcher
             }
         }
 
+        private string GetRelativePath(string fullPath, string baseMountPath)
+        {
+            if (string.IsNullOrEmpty(fullPath) || string.IsNullOrEmpty(baseMountPath))
+                return "/";
+
+            var basePath = baseMountPath.TrimEnd('\\', '/');
+            if (!fullPath.StartsWith(basePath, StringComparison.OrdinalIgnoreCase))
+            {
+                // fallback: return a normalized path
+                var normalized = fullPath.Replace("\\", "/").TrimStart('/');
+                return "/" + normalized;
+            }
+
+            if (fullPath.Length <= basePath.Length)
+                return "/";
+
+            var p = fullPath.Substring(basePath.Length);
+            var relativePath = p.TrimStart('\\', '/').Replace("\\", "/");
+            return "/" + relativePath;
+        }
+
+        private string GetRelativePath(string fullPath, int basePathLength)
+        {
+            if (string.IsNullOrEmpty(fullPath) || basePathLength < 0)
+                return "/";
+
+            if (fullPath.Length <= basePathLength)
+                return "/";
+
+            var p = fullPath.Substring(basePathLength);
+            var relativePath = p.TrimStart('\\', '/').Replace("\\", "/");
+            return "/" + relativePath;
+        }
+
         private void OnFileCreated(object sender, FileSystemEventArgs e)
         {
             if (ShouldSkipFile(e.FullPath) || AreEventsSuppressed()) return;
