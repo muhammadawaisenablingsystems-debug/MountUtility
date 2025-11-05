@@ -4,6 +4,7 @@ using DiskMountUtility.Core.Interfaces;
 using DiskMountUtility.Infrastructure.Cryptography;
 using DiskMountUtility.Infrastructure.Persistence;
 using DiskMountUtility.Infrastructure.Storage;
+using MountUtility.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 

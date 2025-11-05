@@ -145,28 +145,15 @@ namespace DiskMountUtility.Infrastructure.Storage
                 PasswordHash = passwordHash
             };
 
-            var initialData = new { files = new List<DiskFile>() };
-            var jsonData = JsonSerializer.SerializeToUtf8Bytes(initialData);
-
-            var encryptedData = _cryptographyService.EncryptData(
-                jsonData,
-                password,
-                out var kyberCiphertext,
-                out var kyberPublicKey,
-                out var kyberSecretKeyEncrypted,
-                out var diskNonce,
-                salt,
-                out var kyberSecretKeyNonce
-            );
-
+            // Create initial JSON structure with disk-level metadata and empty files array
             var metadata = new EncryptionMetadata
             {
-                KyberCiphertext = kyberCiphertext,
-                KyberPublicKey = kyberPublicKey,
-                KyberSecretKeyEncrypted = kyberSecretKeyEncrypted,
-                Nonce = diskNonce,
+                KyberCiphertext = Array.Empty<byte>(),
+                KyberPublicKey = Array.Empty<byte>(),
+                KyberSecretKeyEncrypted = Array.Empty<byte>(),
+                Nonce = Array.Empty<byte>(),
                 Salt = salt,
-                KyberSecretKeyNonce = kyberSecretKeyNonce,
+                KyberSecretKeyNonce = Array.Empty<byte>(),
                 VirtualDiskId = disk.Id
             };
 
@@ -176,14 +163,9 @@ namespace DiskMountUtility.Infrastructure.Storage
             {
                 metadata = new
                 {
-                    kyberCiphertext = Convert.ToBase64String(kyberCiphertext),
-                    kyberPublicKey = Convert.ToBase64String(kyberPublicKey),
-                    kyberSecretKey = Convert.ToBase64String(kyberSecretKeyEncrypted),
-                    kyberSecretKeyNonce = Convert.ToBase64String(kyberSecretKeyNonce),
-                    nonce = Convert.ToBase64String(diskNonce),
                     salt = Convert.ToBase64String(salt)
                 },
-                encryptedContent = Convert.ToBase64String(encryptedData)
+                files = new object[] { }
             };
 
             await File.WriteAllTextAsync(filePath, JsonSerializer.Serialize(diskData));
@@ -223,29 +205,54 @@ namespace DiskMountUtility.Infrastructure.Storage
 
                 var jsonContent = await File.ReadAllTextAsync(disk.FilePath);
                 var diskData = JsonSerializer.Deserialize<JsonDocument>(jsonContent);
-                var encryptedContent = Convert.FromBase64String(
-                    diskData!.RootElement.GetProperty("encryptedContent").GetString()!
-                );
-
-                var decryptedData = _cryptographyService.DecryptData(
-                    encryptedContent,
-                    password,
-                    metadata.KyberCiphertext,
-                    metadata.KyberPublicKey,
-                    metadata.KyberSecretKeyEncrypted,
-                    metadata.KyberSecretKeyNonce,
-                    metadata.Nonce,
-                    metadata.Salt
-                );
-
-                var diskContent = JsonSerializer.Deserialize<JsonDocument>(decryptedData);
-                var files = diskContent!.RootElement.GetProperty("files");
 
                 _mountedDiskFiles.Clear();
-                foreach (var file in files.EnumerateArray())
+
+                if (diskData != null && diskData.RootElement.TryGetProperty("files", out var filesElement))
                 {
-                    var diskFile = JsonSerializer.Deserialize<DiskFile>(file.GetRawText())!;
-                    _mountedDiskFiles[diskFile.Path] = diskFile;
+                    foreach (var fileEl in filesElement.EnumerateArray())
+                    {
+                        try
+                        {
+                            var path = fileEl.GetProperty("path").GetString()!;
+                            var name = fileEl.TryGetProperty("name", out var n) ? n.GetString() ?? Path.GetFileName(path) : Path.GetFileName(path);
+                            var isDir = fileEl.TryGetProperty("isDirectory", out var d) && d.GetBoolean();
+                            var size = fileEl.TryGetProperty("sizeInBytes", out var s) ? s.GetInt64() : 0L;
+                            var createdAt = fileEl.TryGetProperty("createdAt", out var c) && c.ValueKind == JsonValueKind.String ? DateTime.Parse(c.GetString()!) : DateTime.UtcNow;
+                            var modifiedAt = fileEl.TryGetProperty("modifiedAt", out var m) && m.ValueKind == JsonValueKind.String ? DateTime.Parse(m.GetString()!) : DateTime.UtcNow;
+
+                            byte[] encryptedContent = Array.Empty<byte>();
+                            if (fileEl.TryGetProperty("encryptedContent", out var enc) && enc.ValueKind == JsonValueKind.String)
+                            {
+                                encryptedContent = Convert.FromBase64String(enc.GetString()!);
+                            }
+
+                            var diskFile = new DiskFile
+                            {
+                                Id = Guid.NewGuid(),
+                                DiskId = disk.Id,
+                                Name = name,
+                                Path = path,
+                                SizeInBytes = size,
+                                IsDirectory = isDir,
+                                CreatedAt = createdAt,
+                                ModifiedAt = modifiedAt,
+                                EncryptedContent = encryptedContent,
+                                KyberCiphertext = fileEl.TryGetProperty("kyberCiphertext", out var kct) && kct.ValueKind == JsonValueKind.String ? Convert.FromBase64String(kct.GetString()!) : Array.Empty<byte>(),
+                                KyberPublicKey = fileEl.TryGetProperty("kyberPublicKey", out var kpk) && kpk.ValueKind == JsonValueKind.String ? Convert.FromBase64String(kpk.GetString()!) : Array.Empty<byte>(),
+                                KyberSecretKeyEncrypted = fileEl.TryGetProperty("kyberSecretKey", out var ksk) && ksk.ValueKind == JsonValueKind.String ? Convert.FromBase64String(ksk.GetString()!) : Array.Empty<byte>(),
+                                KyberSecretKeyNonce = fileEl.TryGetProperty("kyberSecretKeyNonce", out var kskn) && kskn.ValueKind == JsonValueKind.String ? Convert.FromBase64String(kskn.GetString()!) : Array.Empty<byte>(),
+                                FileNonce = fileEl.TryGetProperty("fileNonce", out var fn) && fn.ValueKind == JsonValueKind.String ? Convert.FromBase64String(fn.GetString()!) : Array.Empty<byte>(),
+                                Salt = fileEl.TryGetProperty("salt", out var saltEl) && saltEl.ValueKind == JsonValueKind.String ? Convert.FromBase64String(saltEl.GetString()!) : Array.Empty<byte>()
+                            };
+
+                            _mountedDiskFiles[diskFile.Path] = diskFile;
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"⚠️ Could not load file entry during mount: {ex.Message}");
+                        }
+                    }
                 }
 
                 disk.Status = DiskStatus.Mounted;
@@ -352,57 +359,10 @@ namespace DiskMountUtility.Infrastructure.Storage
                 }
 
                 var jsonContent = await File.ReadAllTextAsync(disk.FilePath);
-                var diskData = JsonSerializer.Deserialize<JsonDocument>(jsonContent);
-                var encryptedContent = Convert.FromBase64String(
-                    diskData!.RootElement.GetProperty("encryptedContent").GetString()!
-                );
-
-                var decryptedData = _cryptographyService.DecryptData(
-                    encryptedContent,
-                    password,
-                    metadata.KyberCiphertext,
-                    metadata.KyberPublicKey,
-                    metadata.KyberSecretKeyEncrypted,
-                    metadata.KyberSecretKeyNonce,
-                    metadata.Nonce,
-                    metadata.Salt
-                );
-
+                // For per-file model we don't need to decrypt whole vault here - just update disk.SizeInBytes
                 disk.SizeInBytes = newSizeInBytes;
                 disk.LastModifiedAt = DateTime.UtcNow;
 
-                var reEncryptedData = _cryptographyService.EncryptData(
-                    decryptedData,
-                    password,
-                    out var kyberCiphertext,
-                    out var kyberPublicKey,
-                    out var kyberSecretKey,
-                    out var nonce,
-                    metadata.Salt,
-                    out var kyberSecretKeyNonce
-                );
-
-                metadata.KyberCiphertext = kyberCiphertext;
-                metadata.KyberPublicKey = kyberPublicKey;
-                metadata.KyberSecretKeyEncrypted = kyberSecretKey;
-                metadata.Nonce = nonce;
-                metadata.KyberSecretKeyNonce = kyberSecretKeyNonce;
-
-                var updatedDiskData = new
-                {
-                    metadata = new
-                    {
-                        kyberCiphertext = Convert.ToBase64String(kyberCiphertext),
-                        kyberPublicKey = Convert.ToBase64String(kyberPublicKey),
-                        kyberSecretKey = Convert.ToBase64String(kyberSecretKey),
-                        kyberSecretKeyNonce = Convert.ToBase64String(kyberSecretKeyNonce),
-                        nonce = Convert.ToBase64String(nonce),
-                        salt = Convert.ToBase64String(metadata.Salt)
-                    },
-                    encryptedContent = Convert.ToBase64String(reEncryptedData)
-                };
-
-                await File.WriteAllTextAsync(disk.FilePath, JsonSerializer.Serialize(updatedDiskData));
                 await _diskRepository.UpdateAsync(disk);
 
                 return true;
@@ -443,6 +403,20 @@ namespace DiskMountUtility.Infrastructure.Storage
                 return false;
             }
 
+            // Encrypt per-file
+            var password = _mountedDiskPassword ?? string.Empty;
+            var salt = RandomNumberGenerator.GetBytes(32);
+            var encryptedData = _cryptographyService.EncryptData(
+                content,
+                password,
+                out var kyberCiphertext,
+                out var kyberPublicKey,
+                out var kyberSecretKey,
+                out var fileNonce,
+                salt,
+                out var kyberSecretKeyNonce
+            );
+
             var diskFile = new DiskFile
             {
                 Id = Guid.NewGuid(),
@@ -453,7 +427,13 @@ namespace DiskMountUtility.Infrastructure.Storage
                 IsDirectory = false,
                 CreatedAt = DateTime.UtcNow,
                 ModifiedAt = DateTime.UtcNow,
-                EncryptedContent = content
+                EncryptedContent = encryptedData,
+                KyberCiphertext = kyberCiphertext,
+                KyberPublicKey = kyberPublicKey,
+                KyberSecretKeyEncrypted = kyberSecretKey,
+                KyberSecretKeyNonce = kyberSecretKeyNonce,
+                FileNonce = fileNonce,
+                Salt = salt
             };
 
             if (_mountedDiskFiles.ContainsKey(fullPath))
@@ -478,7 +458,31 @@ namespace DiskMountUtility.Infrastructure.Storage
 
             if (_mountedDiskFiles.TryGetValue(path, out var file))
             {
-                return Task.FromResult<byte[]?>(file.EncryptedContent);
+                try
+                {
+                    var password = _mountedDiskPassword ?? string.Empty;
+                    // Decrypt per-file content before returning
+                    if (file.EncryptedContent == null || file.EncryptedContent.Length == 0)
+                        return Task.FromResult<byte[]?>(Array.Empty<byte>());
+
+                    var decrypted = _cryptographyService.DecryptData(
+                        file.EncryptedContent,
+                        password,
+                        file.KyberCiphertext ?? Array.Empty<byte>(),
+                        file.KyberPublicKey ?? Array.Empty<byte>(),
+                        file.KyberSecretKeyEncrypted ?? Array.Empty<byte>(),
+                        file.KyberSecretKeyNonce ?? Array.Empty<byte>(),
+                        file.FileNonce ?? Array.Empty<byte>(),
+                        file.Salt ?? Array.Empty<byte>()
+                    );
+
+                    return Task.FromResult<byte[]?>(decrypted);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"❌ Decrypt file failed: {ex.Message}");
+                    return Task.FromResult<byte[]?>(null);
+                }
             }
 
             return Task.FromResult<byte[]?>(null);
@@ -521,7 +525,13 @@ namespace DiskMountUtility.Infrastructure.Storage
                 IsDirectory = true,
                 CreatedAt = DateTime.UtcNow,
                 ModifiedAt = DateTime.UtcNow,
-                EncryptedContent = Array.Empty<byte>()
+                EncryptedContent = Array.Empty<byte>(),
+                KyberCiphertext = Array.Empty<byte>(),
+                KyberPublicKey = Array.Empty<byte>(),
+                KyberSecretKeyEncrypted = Array.Empty<byte>(),
+                KyberSecretKeyNonce = Array.Empty<byte>(),
+                FileNonce = Array.Empty<byte>(),
+                Salt = Array.Empty<byte>()
             };
 
             _mountedDiskFiles[path] = diskFile;
@@ -543,43 +553,35 @@ namespace DiskMountUtility.Infrastructure.Storage
                 return;
             }
 
-            var dataToEncrypt = new { files = _mountedDiskFiles.Values.ToList() };
-            var jsonData = JsonSerializer.SerializeToUtf8Bytes(dataToEncrypt);
-
-            var password = _mountedDiskPassword ?? string.Empty;
-
-            var encryptedData = _cryptographyService.EncryptData(
-                jsonData,
-                password,
-                out var kyberCiphertext,
-                out var kyberPublicKey,
-                out var kyberSecretKey,
-                out var nonce,
-                metadata.Salt,
-                out var kyberSecretKeyNonce
-            );
-
-            metadata.KyberCiphertext = kyberCiphertext;
-            metadata.KyberPublicKey = kyberPublicKey;
-            metadata.KyberSecretKeyEncrypted = kyberSecretKey;
-            metadata.Nonce = nonce;
-            metadata.KyberSecretKeyNonce = kyberSecretKeyNonce;
+            // Build per-file JSON entries with base64 encoded encrypted content & per-file metadata
+            var filesJson = _mountedDiskFiles.Values.Select(f => new
+            {
+                path = f.Path,
+                name = f.Name,
+                isDirectory = f.IsDirectory,
+                sizeInBytes = f.SizeInBytes,
+                createdAt = f.CreatedAt.ToString("o"),
+                modifiedAt = f.ModifiedAt.ToString("o"),
+                encryptedContent = f.EncryptedContent != null ? Convert.ToBase64String(f.EncryptedContent) : null,
+                kyberCiphertext = f.KyberCiphertext != null ? Convert.ToBase64String(f.KyberCiphertext) : null,
+                kyberPublicKey = f.KyberPublicKey != null ? Convert.ToBase64String(f.KyberPublicKey) : null,
+                kyberSecretKey = f.KyberSecretKeyEncrypted != null ? Convert.ToBase64String(f.KyberSecretKeyEncrypted) : null,
+                kyberSecretKeyNonce = f.KyberSecretKeyNonce != null ? Convert.ToBase64String(f.KyberSecretKeyNonce) : null,
+                fileNonce = f.FileNonce != null ? Convert.ToBase64String(f.FileNonce) : null,
+                salt = f.Salt != null ? Convert.ToBase64String(f.Salt) : null
+            }).ToList();
 
             var updatedDiskData = new
             {
                 metadata = new
                 {
-                    kyberCiphertext = Convert.ToBase64String(kyberCiphertext),
-                    kyberPublicKey = Convert.ToBase64String(kyberPublicKey),
-                    kyberSecretKey = Convert.ToBase64String(kyberSecretKey),
-                    kyberSecretKeyNonce = Convert.ToBase64String(kyberSecretKeyNonce),
-                    nonce = Convert.ToBase64String(nonce),
                     salt = Convert.ToBase64String(metadata.Salt)
                 },
-                encryptedContent = Convert.ToBase64String(encryptedData)
+                files = filesJson
             };
 
             await File.WriteAllTextAsync(_mountedDisk.FilePath, JsonSerializer.Serialize(updatedDiskData));
+            _mountedDisk.LastModifiedAt = DateTime.UtcNow;
             await _diskRepository.UpdateAsync(_mountedDisk);
         }
 
@@ -644,21 +646,45 @@ namespace DiskMountUtility.Infrastructure.Storage
 
             try
             {
+                // Extract: write DECRYPTED file content for each file into the tempExtractFolder
                 foreach (var kv in _mountedDiskFiles)
                 {
                     var file = kv.Value;
+                    var relative = file.Path.TrimStart('/').Replace("/", Path.DirectorySeparatorChar.ToString());
+                    var outPath = Path.Combine(tempExtractFolder, relative);
+
                     if (file.IsDirectory)
                     {
-                        var dirPath = Path.Combine(tempExtractFolder, file.Path.TrimStart('/').Replace("/", Path.DirectorySeparatorChar.ToString()));
-                        Directory.CreateDirectory(dirPath);
+                        Directory.CreateDirectory(outPath);
                     }
                     else
                     {
-                        var outPath = Path.Combine(tempExtractFolder, file.Path.TrimStart('/').Replace("/", Path.DirectorySeparatorChar.ToString()));
                         var parent = Path.GetDirectoryName(outPath);
                         if (!string.IsNullOrEmpty(parent) && !Directory.Exists(parent))
                             Directory.CreateDirectory(parent);
-                        await File.WriteAllBytesAsync(outPath, file.EncryptedContent ?? Array.Empty<byte>());
+
+                        // Decrypt per-file content before writing to extracted folder
+                        byte[] decrypted = Array.Empty<byte>();
+                        try
+                        {
+                            decrypted = _cryptographyService.DecryptData(
+                                file.EncryptedContent ?? Array.Empty<byte>(),
+                                _mountedDiskPassword ?? string.Empty,
+                                file.KyberCiphertext ?? Array.Empty<byte>(),
+                                file.KyberPublicKey ?? Array.Empty<byte>(),
+                                file.KyberSecretKeyEncrypted ?? Array.Empty<byte>(),
+                                file.KyberSecretKeyNonce ?? Array.Empty<byte>(),
+                                file.FileNonce ?? Array.Empty<byte>(),
+                                file.Salt ?? Array.Empty<byte>()
+                            );
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"⚠️ Could not decrypt file '{file.Path}' for mount: {ex.Message}");
+                            decrypted = Array.Empty<byte>();
+                        }
+
+                        await File.WriteAllBytesAsync(outPath, decrypted ?? Array.Empty<byte>());
                     }
                 }
 

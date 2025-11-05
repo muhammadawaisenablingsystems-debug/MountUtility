@@ -1,4 +1,5 @@
-﻿using System;
+﻿using MountUtility.Services;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
@@ -18,22 +19,24 @@ namespace DiskMountUtility.Application.FileWatcher
         private readonly SemaphoreSlim _processingLock = new(1, 1);
         private bool _disposed = false;
 
-        private const int DebounceDelayMs = 2000;
+        // ✅ FIX: Increased debounce to handle Windows write delays
+        private const int DebounceDelayMs = 3000;
 
         public event Action<string>? FileAdded;
         public event Action<string>? FileUpdated;
         public event Action<string>? FileDeleted;
         public event Action<string, string>? FileRenamed;
 
-        public Func<string, Application.Services.FileChangeType, string?, Task>? OnChangeDetected { get; set; }
+        public Func<string, FileChangeType, string?, Task>? OnChangeDetected { get; set; }
 
         public bool EnableDebugLogging { get; set; } = false;
 
+        // ✅ FIX: Use int for atomic operations (0=false, 1=true)
         private int _suppressEventsFlag = 0;
 
         private sealed class PendingChange
         {
-            public Application.Services.FileChangeType ChangeType { get; set; }
+            public FileChangeType ChangeType { get; set; }
             public string? OldPath { get; set; }
             public DateTime LastSeenUtc { get; set; }
         }
@@ -151,31 +154,31 @@ namespace DiskMountUtility.Application.FileWatcher
         {
             if (ShouldSkipFile(e.FullPath) || AreEventsSuppressed()) return;
 
-            EnqueueOrMerge(e.FullPath, Application.Services.FileChangeType.Created);
+            EnqueueOrMerge(e.FullPath, FileChangeType.Created);
         }
 
         private void OnFileChanged(object sender, FileSystemEventArgs e)
         {
             if (ShouldSkipFile(e.FullPath) || AreEventsSuppressed()) return;
 
-            EnqueueOrMerge(e.FullPath, Application.Services.FileChangeType.Modified);
+            EnqueueOrMerge(e.FullPath, FileChangeType.Modified);
         }
 
         private void OnFileDeleted(object sender, FileSystemEventArgs e)
         {
             if (ShouldSkipFile(e.FullPath) || AreEventsSuppressed()) return;
 
-            EnqueueOrMerge(e.FullPath, Application.Services.FileChangeType.Deleted);
+            EnqueueOrMerge(e.FullPath, FileChangeType.Deleted);
         }
 
         private void OnFileRenamed(object sender, RenamedEventArgs e)
         {
             if ((ShouldSkipFile(e.FullPath) && ShouldSkipFile(e.OldFullPath)) || AreEventsSuppressed()) return;
 
-            EnqueueOrMerge(e.FullPath, Application.Services.FileChangeType.Renamed, e.OldFullPath);
+            EnqueueOrMerge(e.FullPath, FileChangeType.Renamed, e.OldFullPath);
         }
 
-        private void EnqueueOrMerge(string fullPath, Application.Services.FileChangeType changeType, string? oldPath = null)
+        private void EnqueueOrMerge(string fullPath, FileChangeType changeType, string? oldPath = null)
         {
             var now = DateTime.UtcNow;
 
@@ -188,18 +191,19 @@ namespace DiskMountUtility.Application.FileWatcher
                 },
                 updateValueFactory: (_, existing) =>
                 {
-                    if (changeType == Application.Services.FileChangeType.Renamed)
+                    if (changeType == FileChangeType.Renamed)
                     {
-                        existing.ChangeType = Application.Services.FileChangeType.Renamed;
+                        existing.ChangeType = FileChangeType.Renamed;
                         existing.OldPath = oldPath;
                     }
-                    else if (existing.ChangeType == Application.Services.FileChangeType.Created &&
-                             changeType == Application.Services.FileChangeType.Modified)
+                    else if (existing.ChangeType == FileChangeType.Created &&
+                             changeType == FileChangeType.Modified)
                     {
+                        // keep Created
                     }
-                    else if (changeType == Application.Services.FileChangeType.Deleted)
+                    else if (changeType == FileChangeType.Deleted)
                     {
-                        existing.ChangeType = Application.Services.FileChangeType.Deleted;
+                        existing.ChangeType = FileChangeType.Deleted;
                         existing.OldPath = null;
                     }
                     else
@@ -223,6 +227,7 @@ namespace DiskMountUtility.Application.FileWatcher
 
         private async Task ScheduleProcessPendingChangesAsync()
         {
+            // ✅ FIX: Don't skip if already processing, queue will handle it
             if (!await _processingLock.WaitAsync(0).ConfigureAwait(false))
             {
                 Log("⏳ Processing already in progress, will process in next cycle");
@@ -255,16 +260,16 @@ namespace DiskMountUtility.Application.FileWatcher
                         ready.Add(kv);
                 }
 
-                if (ready.Count == 0)
-                    return;
+                if (ready.Count == 0) return;
 
                 foreach (var kv in ready)
                     _pendingChanges.TryRemove(kv.Key, out _);
 
+                // ✅ FIX: Process with suppression to avoid feedback loops
                 Interlocked.Exchange(ref _suppressEventsFlag, 1);
                 try
                 {
-                    var tasks = ready.Select(async kv =>
+                    foreach (var kv in ready)
                     {
                         var path = kv.Key;
                         var pending = kv.Value;
@@ -279,13 +284,12 @@ namespace DiskMountUtility.Application.FileWatcher
                         {
                             Log($"❌ Sync error for {Path.GetFileName(path)}: {ex.Message}");
                         }
-                    });
-
-                    await Task.WhenAll(tasks).ConfigureAwait(false);
+                    }
                 }
                 finally
                 {
-                    await Task.Delay(500);
+                    // ✅ FIX: Wait before re-enabling events to let writes settle
+                    await Task.Delay(1000);
                     Interlocked.Exchange(ref _suppressEventsFlag, 0);
                 }
             }
@@ -295,7 +299,7 @@ namespace DiskMountUtility.Application.FileWatcher
             }
         }
 
-        private async Task SafeInvokeOnChangeDetectedAsync(string fullPath, Application.Services.FileChangeType changeType, string? oldPath)
+        private async Task SafeInvokeOnChangeDetectedAsync(string fullPath, FileChangeType changeType, string? oldPath)
         {
             try
             {
@@ -344,6 +348,7 @@ namespace DiskMountUtility.Application.FileWatcher
             }
             catch
             {
+                // ignore
             }
 
             return false;

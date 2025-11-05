@@ -5,6 +5,7 @@ using DiskMountUtility.Core.Interfaces;
 using DiskMountUtility.Infrastructure.Cryptography;
 using DiskMountUtility.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
+using MountUtility.Services;
 using System;
 
 namespace DiskMountUtility.Application.Services
