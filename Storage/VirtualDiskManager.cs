@@ -553,36 +553,119 @@ namespace DiskMountUtility.Infrastructure.Storage
                 return;
             }
 
-            // Build per-file JSON entries with base64 encoded encrypted content & per-file metadata
-            var filesJson = _mountedDiskFiles.Values.Select(f => new
-            {
-                path = f.Path,
-                name = f.Name,
-                isDirectory = f.IsDirectory,
-                sizeInBytes = f.SizeInBytes,
-                createdAt = f.CreatedAt.ToString("o"),
-                modifiedAt = f.ModifiedAt.ToString("o"),
-                encryptedContent = f.EncryptedContent != null ? Convert.ToBase64String(f.EncryptedContent) : null,
-                kyberCiphertext = f.KyberCiphertext != null ? Convert.ToBase64String(f.KyberCiphertext) : null,
-                kyberPublicKey = f.KyberPublicKey != null ? Convert.ToBase64String(f.KyberPublicKey) : null,
-                kyberSecretKey = f.KyberSecretKeyEncrypted != null ? Convert.ToBase64String(f.KyberSecretKeyEncrypted) : null,
-                kyberSecretKeyNonce = f.KyberSecretKeyNonce != null ? Convert.ToBase64String(f.KyberSecretKeyNonce) : null,
-                fileNonce = f.FileNonce != null ? Convert.ToBase64String(f.FileNonce) : null,
-                salt = f.Salt != null ? Convert.ToBase64String(f.Salt) : null
-            }).ToList();
+            var vaultPath = _mountedDisk.FilePath;
+            var tempPath = vaultPath + ".tmp";
 
-            var updatedDiskData = new
+            try
             {
-                metadata = new
+                // Ensure directory exists
+                Directory.CreateDirectory(Path.GetDirectoryName(vaultPath) ?? ".");
+
+                // Stream JSON to a temp file to avoid building huge in-memory objects
+                using (var fs = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None, 65536, useAsync: true))
+                using (var writer = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = false }))
                 {
-                    salt = Convert.ToBase64String(metadata.Salt)
-                },
-                files = filesJson
-            };
+                    writer.WriteStartObject();
 
-            await File.WriteAllTextAsync(_mountedDisk.FilePath, JsonSerializer.Serialize(updatedDiskData));
-            _mountedDisk.LastModifiedAt = DateTime.UtcNow;
-            await _diskRepository.UpdateAsync(_mountedDisk);
+                    writer.WritePropertyName("metadata");
+                    writer.WriteStartObject();
+                    writer.WriteString("salt", Convert.ToBase64String(metadata.Salt ?? Array.Empty<byte>()));
+                    writer.WriteEndObject();
+
+                    writer.WritePropertyName("files");
+                    writer.WriteStartArray();
+
+                    foreach (var f in _mountedDiskFiles.Values)
+                    {
+                        try
+                        {
+                            writer.WriteStartObject();
+
+                            writer.WriteString("path", f.Path);
+                            writer.WriteString("name", f.Name);
+                            writer.WriteBoolean("isDirectory", f.IsDirectory);
+                            writer.WriteNumber("sizeInBytes", f.SizeInBytes);
+                            writer.WriteString("createdAt", f.CreatedAt.ToString("o"));
+                            writer.WriteString("modifiedAt", f.ModifiedAt.ToString("o"));
+
+                            if (f.EncryptedContent != null && f.EncryptedContent.Length > 0)
+                                writer.WriteBase64String("encryptedContent", f.EncryptedContent);
+                            else
+                                writer.WriteNull("encryptedContent");
+
+                            if (f.KyberCiphertext != null && f.KyberCiphertext.Length > 0)
+                                writer.WriteBase64String("kyberCiphertext", f.KyberCiphertext);
+                            else
+                                writer.WriteNull("kyberCiphertext");
+
+                            if (f.KyberPublicKey != null && f.KyberPublicKey.Length > 0)
+                                writer.WriteBase64String("kyberPublicKey", f.KyberPublicKey);
+                            else
+                                writer.WriteNull("kyberPublicKey");
+
+                            if (f.KyberSecretKeyEncrypted != null && f.KyberSecretKeyEncrypted.Length > 0)
+                                writer.WriteBase64String("kyberSecretKey", f.KyberSecretKeyEncrypted);
+                            else
+                                writer.WriteNull("kyberSecretKey");
+
+                            if (f.KyberSecretKeyNonce != null && f.KyberSecretKeyNonce.Length > 0)
+                                writer.WriteBase64String("kyberSecretKeyNonce", f.KyberSecretKeyNonce);
+                            else
+                                writer.WriteNull("kyberSecretKeyNonce");
+
+                            if (f.FileNonce != null && f.FileNonce.Length > 0)
+                                writer.WriteBase64String("fileNonce", f.FileNonce);
+                            else
+                                writer.WriteNull("fileNonce");
+
+                            if (f.Salt != null && f.Salt.Length > 0)
+                                writer.WriteBase64String("salt", f.Salt);
+                            else
+                                writer.WriteNull("salt");
+
+                            writer.WriteEndObject();
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"⚠️ Error serializing file entry '{f.Path}': {ex.Message}");
+                        }
+                    }
+
+                    writer.WriteEndArray();
+                    writer.WriteEndObject();
+                    await writer.FlushAsync().ConfigureAwait(false);
+                    await fs.FlushAsync().ConfigureAwait(false);
+                }
+
+                // Atomically replace the original file (avoid partial overwrites)
+                if (File.Exists(vaultPath))
+                {
+                    // Use Replace to minimize risk (keeps atomic replace semantics if possible)
+                    try
+                    {
+                        File.Replace(tempPath, vaultPath, null);
+                    }
+                    catch
+                    {
+                        // Fallback to Move overwrite (supported in .NET)
+                        File.Delete(vaultPath);
+                        File.Move(tempPath, vaultPath);
+                    }
+                }
+                else
+                {
+                    File.Move(tempPath, vaultPath);
+                }
+
+                _mountedDisk.LastModifiedAt = DateTime.UtcNow;
+                await _diskRepository.UpdateAsync(_mountedDisk);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ SaveMountedDiskAsync failed: {ex.Message}");
+                // Clean up temp file if exists
+                try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { }
+            }
         }
 
         public async Task<bool> MountAsPhysicalDriveAsync(Guid diskId)
@@ -663,7 +746,6 @@ namespace DiskMountUtility.Infrastructure.Storage
                         if (!string.IsNullOrEmpty(parent) && !Directory.Exists(parent))
                             Directory.CreateDirectory(parent);
 
-                        // Decrypt per-file content before writing to extracted folder
                         byte[] decrypted = Array.Empty<byte>();
                         try
                         {
@@ -684,7 +766,20 @@ namespace DiskMountUtility.Infrastructure.Storage
                             decrypted = Array.Empty<byte>();
                         }
 
-                        await File.WriteAllBytesAsync(outPath, decrypted ?? Array.Empty<byte>());
+                        // Write using FileStream to reduce temporary buffering and allow async IO
+                        try
+                        {
+                            using var outFs = new FileStream(outPath, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: 65536, useAsync: true);
+                            if (decrypted.Length > 0)
+                            {
+                                await outFs.WriteAsync(decrypted.AsMemory(0, decrypted.Length)).ConfigureAwait(false);
+                            }
+                            await outFs.FlushAsync().ConfigureAwait(false);
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"⚠️ Failed to write decrypted file '{outPath}': {ex.Message}");
+                        }
                     }
                 }
 
