@@ -87,13 +87,21 @@ namespace DiskMountUtility.Infrastructure.Persistence
 
                 entity.Property(e => e.Name).HasMaxLength(255);
                 entity.Property(e => e.Path).HasMaxLength(500);
+                entity.Property(e => e.SizeInBytes);
+                entity.Property(e => e.IsDirectory);
+                entity.Property(e => e.CreatedAt);
+                entity.Property(e => e.ModifiedAt);
 
-                // SQLite automatically handles BLOBs — no varbinary(max)
+                // Existing Kyber fields
                 entity.Property(e => e.EncryptedContent);
                 entity.Property(e => e.KyberCiphertext);
                 entity.Property(e => e.KyberPublicKey);
                 entity.Property(e => e.KyberSecretKeyEncrypted);
                 entity.Property(e => e.KyberSecretKeyNonce);
+
+                // New ECDH ephemeral public key per file
+                entity.Property(e => e.EcdhEphemeralPublic);
+
                 entity.Property(e => e.FileNonce);
                 entity.Property(e => e.Salt);
 
@@ -111,13 +119,26 @@ namespace DiskMountUtility.Infrastructure.Persistence
                 entity.ToTable("EncryptionMetadata");
                 entity.HasKey(e => e.Id);
 
+                // Existing Kyber fields
                 entity.Property(e => e.KyberCiphertext);
                 entity.Property(e => e.KyberPublicKey);
-                entity.Property(e => e.Nonce);
-                entity.Property(e => e.Salt);
                 entity.Property(e => e.KyberSecretKeyEncrypted);
                 entity.Property(e => e.KyberSecretKeyNonce);
+
+                // New ECDH fields
+                entity.Property(e => e.EcdhPublicKey);
+                entity.Property(e => e.EcdhPrivateKeyEncrypted);
+                entity.Property(e => e.EcdhPrivateKeyNonce);
+
+                // Common metadata
+                entity.Property(e => e.Nonce);
+                entity.Property(e => e.Salt);
+
+                entity.HasOne(v => v.VirtualDisk)
+                      .WithOne(m => m.Metadata)
+                      .HasForeignKey<EncryptionMetadata>(m => m.VirtualDiskId)
+                      .OnDelete(DeleteBehavior.Cascade);
             });
-        }   
+        }
     }
 }

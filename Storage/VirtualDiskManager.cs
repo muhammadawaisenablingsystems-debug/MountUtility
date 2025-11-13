@@ -1,7 +1,9 @@
 ﻿using DiskMountUtility.Core.Entities;
 using DiskMountUtility.Core.Enums;
 using DiskMountUtility.Core.Interfaces;
+using DiskMountUtility.Infrastructure.Cryptography;
 using Microsoft.Win32.SafeHandles;
+using MountUtility.Enums;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -18,6 +20,7 @@ namespace DiskMountUtility.Infrastructure.Storage
         private Dictionary<string, DiskFile> _mountedDiskFiles = new();
         public string? MountedVaultPath { get; private set; }
         private string? _mountedDiskPassword;
+        private const int NonceSize = 12;
 
         // ✅ Track VHDX handle to properly dispose
         private SafeFileHandle? _activeVhdxHandle;
@@ -132,6 +135,11 @@ namespace DiskMountUtility.Infrastructure.Storage
             var salt = RandomNumberGenerator.GetBytes(32);
             var passwordHash = _cryptographyService.HashPassword(password, salt);
 
+            // Pick algorithm from user's preference
+            var algo = VaultKeyManager.SelectedKeyExchange == KeyExchangeAlgorithm.EcdhP256
+                ? EncryptionAlgorithm.EcdhP256AesGcm256
+                : EncryptionAlgorithm.KyberAesGcm256;
+
             var disk = new VirtualDisk
             {
                 Id = diskId,
@@ -139,23 +147,35 @@ namespace DiskMountUtility.Infrastructure.Storage
                 SizeInBytes = sizeInBytes,
                 UsedSpaceInBytes = 0,
                 Status = DiskStatus.Created,
-                EncryptionAlgorithm = EncryptionAlgorithm.KyberAesGcm256,
+                EncryptionAlgorithm = algo,
                 FilePath = filePath,
                 CreatedAt = DateTime.UtcNow,
                 PasswordHash = passwordHash
             };
 
-            // Create initial JSON structure with disk-level metadata and empty files array
             var metadata = new EncryptionMetadata
             {
-                KyberCiphertext = Array.Empty<byte>(),
-                KyberPublicKey = Array.Empty<byte>(),
-                KyberSecretKeyEncrypted = Array.Empty<byte>(),
-                Nonce = Array.Empty<byte>(),
                 Salt = salt,
-                KyberSecretKeyNonce = Array.Empty<byte>(),
                 VirtualDiskId = disk.Id
             };
+
+            // If ECDH selected generate recipient keypair and persist public + encrypted private
+            if (algo == EncryptionAlgorithm.EcdhP256AesGcm256)
+            {
+                var (ecdhPub, ecdhPriv) = _cryptographyService.GenerateEcdhKeyPair();
+                metadata.EcdhPublicKey = ecdhPub;
+                metadata.EcdhPrivateKeyNonce = RandomNumberGenerator.GetBytes(NonceSize);
+                var passwordKey = _cryptographyService.DerivePasswordKey(password, salt);
+                metadata.EcdhPrivateKeyEncrypted = _cryptographyService.EncryptKyberSecretKey(ecdhPriv, passwordKey, metadata.EcdhPrivateKeyNonce);
+            }
+            else
+            {
+                // Kyber defaults left empty; per-file Kyber keys are created when writing a file.
+                metadata.KyberCiphertext = Array.Empty<byte>();
+                metadata.KyberPublicKey = Array.Empty<byte>();
+                metadata.KyberSecretKeyEncrypted = Array.Empty<byte>();
+                metadata.KyberSecretKeyNonce = Array.Empty<byte>();
+            }
 
             disk.Metadata = metadata;
 
@@ -163,13 +183,14 @@ namespace DiskMountUtility.Infrastructure.Storage
             {
                 metadata = new
                 {
-                    salt = Convert.ToBase64String(salt)
+                    salt = Convert.ToBase64String(salt),
+                    algorithm = algo.ToString(),
+                    ecdhPublicKey = metadata.EcdhPublicKey.Length > 0 ? Convert.ToBase64String(metadata.EcdhPublicKey) : null
                 },
                 files = new object[] { }
             };
 
             await File.WriteAllTextAsync(filePath, JsonSerializer.Serialize(diskData));
-
             return await _diskRepository.CreateAsync(disk);
         }
 
@@ -210,6 +231,7 @@ namespace DiskMountUtility.Infrastructure.Storage
 
                 if (diskData != null && diskData.RootElement.TryGetProperty("files", out var filesElement))
                 {
+                    // Inside MountDiskAsync, in the file loading loop:
                     foreach (var fileEl in filesElement.EnumerateArray())
                     {
                         try
@@ -242,6 +264,7 @@ namespace DiskMountUtility.Infrastructure.Storage
                                 KyberPublicKey = fileEl.TryGetProperty("kyberPublicKey", out var kpk) && kpk.ValueKind == JsonValueKind.String ? Convert.FromBase64String(kpk.GetString()!) : Array.Empty<byte>(),
                                 KyberSecretKeyEncrypted = fileEl.TryGetProperty("kyberSecretKey", out var ksk) && ksk.ValueKind == JsonValueKind.String ? Convert.FromBase64String(ksk.GetString()!) : Array.Empty<byte>(),
                                 KyberSecretKeyNonce = fileEl.TryGetProperty("kyberSecretKeyNonce", out var kskn) && kskn.ValueKind == JsonValueKind.String ? Convert.FromBase64String(kskn.GetString()!) : Array.Empty<byte>(),
+                                EcdhEphemeralPublic = fileEl.TryGetProperty("ecdhEphemeralPublic", out var eep) && eep.ValueKind == JsonValueKind.String ? Convert.FromBase64String(eep.GetString()!) : Array.Empty<byte>(),
                                 FileNonce = fileEl.TryGetProperty("fileNonce", out var fn) && fn.ValueKind == JsonValueKind.String ? Convert.FromBase64String(fn.GetString()!) : Array.Empty<byte>(),
                                 Salt = fileEl.TryGetProperty("salt", out var saltEl) && saltEl.ValueKind == JsonValueKind.String ? Convert.FromBase64String(saltEl.GetString()!) : Array.Empty<byte>()
                             };
@@ -406,17 +429,40 @@ namespace DiskMountUtility.Infrastructure.Storage
             // Encrypt per-file
             var password = _mountedDiskPassword ?? string.Empty;
             var salt = RandomNumberGenerator.GetBytes(32);
-            var encryptedData = _cryptographyService.EncryptData(
-                content,
-                password,
-                out var kyberCiphertext,
-                out var kyberPublicKey,
-                out var kyberSecretKey,
-                out var fileNonce,
-                salt,
-                out var kyberSecretKeyNonce
-            );
+            byte[] encryptedData;
+            byte[] fileNonce = Array.Empty<byte>();
+            byte[] kyberCiphertext = Array.Empty<byte>();
+            byte[] kyberPublicKey = Array.Empty<byte>();
+            byte[] kyberSecretKeyEncrypted = Array.Empty<byte>();
+            byte[] kyberSecretKeyNonce = Array.Empty<byte>();
+            byte[] ecdhEphemeralPublic = Array.Empty<byte>();
 
+            var metadata = await _diskRepository.GetMetadataByDiskIdAsync(diskId);
+            if (metadata == null)
+            {
+                Console.WriteLine("No metadata found for disk.");
+                return false;
+            }
+
+            if (_mountedDisk.EncryptionAlgorithm == Core.Enums.EncryptionAlgorithm.EcdhP256AesGcm256)
+            {
+                // Use disk-level ECDH recipient public key
+                encryptedData = _cryptographyService.EncryptDataEcdh(content, password, metadata.EcdhPublicKey, out ecdhEphemeralPublic, out fileNonce, salt);
+            }
+            else
+            {
+                encryptedData = _cryptographyService.EncryptData(
+                    content,
+                    password,
+                    out kyberCiphertext,
+                    out kyberPublicKey,
+                    out kyberSecretKeyEncrypted,
+                    out fileNonce,
+                    salt,
+                    out kyberSecretKeyNonce);
+            }
+
+            // create DiskFile and set fields
             var diskFile = new DiskFile
             {
                 Id = Guid.NewGuid(),
@@ -430,8 +476,9 @@ namespace DiskMountUtility.Infrastructure.Storage
                 EncryptedContent = encryptedData,
                 KyberCiphertext = kyberCiphertext,
                 KyberPublicKey = kyberPublicKey,
-                KyberSecretKeyEncrypted = kyberSecretKey,
+                KyberSecretKeyEncrypted = kyberSecretKeyEncrypted,
                 KyberSecretKeyNonce = kyberSecretKeyNonce,
+                EcdhEphemeralPublic = ecdhEphemeralPublic,
                 FileNonce = fileNonce,
                 Salt = salt
             };
@@ -449,11 +496,11 @@ namespace DiskMountUtility.Infrastructure.Storage
             return true;
         }
 
-        public Task<byte[]?> ReadFileAsync(Guid diskId, string path)
+        public async Task<byte[]?> ReadFileAsync(Guid diskId, string path)
         {
             if (_mountedDisk == null || _mountedDisk.Id != diskId)
             {
-                return Task.FromResult<byte[]?>(null);
+                return await Task.FromResult<byte[]?>(null);
             }
 
             if (_mountedDiskFiles.TryGetValue(path, out var file))
@@ -461,31 +508,54 @@ namespace DiskMountUtility.Infrastructure.Storage
                 try
                 {
                     var password = _mountedDiskPassword ?? string.Empty;
-                    // Decrypt per-file content before returning
+
                     if (file.EncryptedContent == null || file.EncryptedContent.Length == 0)
-                        return Task.FromResult<byte[]?>(Array.Empty<byte>());
+                        return await Task.FromResult<byte[]?>(Array.Empty<byte>());
 
-                    var decrypted = _cryptographyService.DecryptData(
-                        file.EncryptedContent,
-                        password,
-                        file.KyberCiphertext ?? Array.Empty<byte>(),
-                        file.KyberPublicKey ?? Array.Empty<byte>(),
-                        file.KyberSecretKeyEncrypted ?? Array.Empty<byte>(),
-                        file.KyberSecretKeyNonce ?? Array.Empty<byte>(),
-                        file.FileNonce ?? Array.Empty<byte>(),
-                        file.Salt ?? Array.Empty<byte>()
-                    );
+                    var metadata = await _diskRepository.GetMetadataByDiskIdAsync(diskId);
+                    if (metadata == null)
+                        throw new InvalidOperationException("Missing metadata");
 
-                    return Task.FromResult<byte[]?>(decrypted);
+                    byte[] decrypted;
+
+                    if (_mountedDisk.EncryptionAlgorithm == EncryptionAlgorithm.EcdhP256AesGcm256)
+                    {
+                        // ECDH decryption path
+                        decrypted = _cryptographyService.DecryptDataEcdh(
+                            file.EncryptedContent,
+                            password,
+                            file.EcdhEphemeralPublic ?? Array.Empty<byte>(),
+                            metadata.EcdhPrivateKeyEncrypted ?? Array.Empty<byte>(),
+                            metadata.EcdhPrivateKeyNonce ?? Array.Empty<byte>(),
+                            file.FileNonce ?? Array.Empty<byte>(),
+                            file.Salt ?? Array.Empty<byte>()
+                        );
+                    }
+                    else
+                    {
+                        // Kyber decryption path
+                        decrypted = _cryptographyService.DecryptData(
+                            file.EncryptedContent,
+                            password,
+                            file.KyberCiphertext ?? Array.Empty<byte>(),
+                            file.KyberPublicKey ?? Array.Empty<byte>(),
+                            file.KyberSecretKeyEncrypted ?? Array.Empty<byte>(),
+                            file.KyberSecretKeyNonce ?? Array.Empty<byte>(),
+                            file.FileNonce ?? Array.Empty<byte>(),
+                            file.Salt ?? Array.Empty<byte>()
+                        );
+                    }
+
+                    return await Task.FromResult<byte[]?>(decrypted);
                 }
                 catch (Exception ex)
                 {
                     Console.WriteLine($"❌ Decrypt file failed: {ex.Message}");
-                    return Task.FromResult<byte[]?>(null);
+                    return await Task.FromResult<byte[]?>(null);
                 }
             }
 
-            return Task.FromResult<byte[]?>(null);
+            return await Task.FromResult<byte[]?>(null);
         }
 
         public async Task<bool> DeleteFileAsync(Guid diskId, string path)
@@ -558,23 +628,30 @@ namespace DiskMountUtility.Infrastructure.Storage
 
             try
             {
-                // Ensure directory exists
                 Directory.CreateDirectory(Path.GetDirectoryName(vaultPath) ?? ".");
 
-                // Stream JSON to a temp file to avoid building huge in-memory objects
                 using (var fs = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None, 65536, useAsync: true))
                 using (var writer = new Utf8JsonWriter(fs, new JsonWriterOptions { Indented = false }))
                 {
                     writer.WriteStartObject();
 
+                    // metadata (salt + ecdhPublicKey when present)
                     writer.WritePropertyName("metadata");
                     writer.WriteStartObject();
                     writer.WriteString("salt", Convert.ToBase64String(metadata.Salt ?? Array.Empty<byte>()));
+
+                    if (metadata.EcdhPublicKey != null && metadata.EcdhPublicKey.Length > 0)
+                        writer.WriteBase64String("ecdhPublicKey", metadata.EcdhPublicKey);
+                    else
+                        writer.WriteNull("ecdhPublicKey");
+
                     writer.WriteEndObject();
 
+                    // files
                     writer.WritePropertyName("files");
                     writer.WriteStartArray();
 
+                    // In SaveMountedDiskAsync, inside the foreach loop writing file entries:
                     foreach (var f in _mountedDiskFiles.Values)
                     {
                         try
@@ -593,6 +670,7 @@ namespace DiskMountUtility.Infrastructure.Storage
                             else
                                 writer.WriteNull("encryptedContent");
 
+                            // Write Kyber fields only if used
                             if (f.KyberCiphertext != null && f.KyberCiphertext.Length > 0)
                                 writer.WriteBase64String("kyberCiphertext", f.KyberCiphertext);
                             else
@@ -613,6 +691,13 @@ namespace DiskMountUtility.Infrastructure.Storage
                             else
                                 writer.WriteNull("kyberSecretKeyNonce");
 
+                            // Write ECDH per-file ephemeral public key
+                            if (f.EcdhEphemeralPublic != null && f.EcdhEphemeralPublic.Length > 0)
+                                writer.WriteBase64String("ecdhEphemeralPublic", f.EcdhEphemeralPublic);
+                            else
+                                writer.WriteNull("ecdhEphemeralPublic");
+
+                            // Common per-file fields
                             if (f.FileNonce != null && f.FileNonce.Length > 0)
                                 writer.WriteBase64String("fileNonce", f.FileNonce);
                             else
@@ -637,20 +722,11 @@ namespace DiskMountUtility.Infrastructure.Storage
                     await fs.FlushAsync().ConfigureAwait(false);
                 }
 
-                // Atomically replace the original file (avoid partial overwrites)
+                // atomic replace
                 if (File.Exists(vaultPath))
                 {
-                    // Use Replace to minimize risk (keeps atomic replace semantics if possible)
-                    try
-                    {
-                        File.Replace(tempPath, vaultPath, null);
-                    }
-                    catch
-                    {
-                        // Fallback to Move overwrite (supported in .NET)
-                        File.Delete(vaultPath);
-                        File.Move(tempPath, vaultPath);
-                    }
+                    try { File.Replace(tempPath, vaultPath, null); }
+                    catch { File.Delete(vaultPath); File.Move(tempPath, vaultPath); }
                 }
                 else
                 {
@@ -663,7 +739,6 @@ namespace DiskMountUtility.Infrastructure.Storage
             catch (Exception ex)
             {
                 Console.WriteLine($"❌ SaveMountedDiskAsync failed: {ex.Message}");
-                // Clean up temp file if exists
                 try { if (File.Exists(tempPath)) File.Delete(tempPath); } catch { }
             }
         }
@@ -730,6 +805,7 @@ namespace DiskMountUtility.Infrastructure.Storage
             try
             {
                 // Extract: write DECRYPTED file content for each file into the tempExtractFolder
+                // Extract: write DECRYPTED file content for each file into the tempExtractFolder
                 foreach (var kv in _mountedDiskFiles)
                 {
                     var file = kv.Value;
@@ -749,16 +825,37 @@ namespace DiskMountUtility.Infrastructure.Storage
                         byte[] decrypted = Array.Empty<byte>();
                         try
                         {
-                            decrypted = _cryptographyService.DecryptData(
-                                file.EncryptedContent ?? Array.Empty<byte>(),
-                                _mountedDiskPassword ?? string.Empty,
-                                file.KyberCiphertext ?? Array.Empty<byte>(),
-                                file.KyberPublicKey ?? Array.Empty<byte>(),
-                                file.KyberSecretKeyEncrypted ?? Array.Empty<byte>(),
-                                file.KyberSecretKeyNonce ?? Array.Empty<byte>(),
-                                file.FileNonce ?? Array.Empty<byte>(),
-                                file.Salt ?? Array.Empty<byte>()
-                            );
+                            var metadata = await _diskRepository.GetMetadataByDiskIdAsync(diskId);
+                            if (metadata == null)
+                                throw new InvalidOperationException("Missing metadata");
+
+                            if (disk.EncryptionAlgorithm == EncryptionAlgorithm.EcdhP256AesGcm256)
+                            {
+                                // ECDH decryption
+                                decrypted = _cryptographyService.DecryptDataEcdh(
+                                    file.EncryptedContent ?? Array.Empty<byte>(),
+                                    _mountedDiskPassword ?? string.Empty,
+                                    file.EcdhEphemeralPublic ?? Array.Empty<byte>(),
+                                    metadata.EcdhPrivateKeyEncrypted ?? Array.Empty<byte>(),
+                                    metadata.EcdhPrivateKeyNonce ?? Array.Empty<byte>(),
+                                    file.FileNonce ?? Array.Empty<byte>(),
+                                    file.Salt ?? Array.Empty<byte>()
+                                );
+                            }
+                            else
+                            {
+                                // Kyber decryption
+                                decrypted = _cryptographyService.DecryptData(
+                                    file.EncryptedContent ?? Array.Empty<byte>(),
+                                    _mountedDiskPassword ?? string.Empty,
+                                    file.KyberCiphertext ?? Array.Empty<byte>(),
+                                    file.KyberPublicKey ?? Array.Empty<byte>(),
+                                    file.KyberSecretKeyEncrypted ?? Array.Empty<byte>(),
+                                    file.KyberSecretKeyNonce ?? Array.Empty<byte>(),
+                                    file.FileNonce ?? Array.Empty<byte>(),
+                                    file.Salt ?? Array.Empty<byte>()
+                                );
+                            }
                         }
                         catch (Exception ex)
                         {
@@ -766,7 +863,6 @@ namespace DiskMountUtility.Infrastructure.Storage
                             decrypted = Array.Empty<byte>();
                         }
 
-                        // Write using FileStream to reduce temporary buffering and allow async IO
                         try
                         {
                             using var outFs = new FileStream(outPath, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: 65536, useAsync: true);
@@ -787,13 +883,13 @@ namespace DiskMountUtility.Infrastructure.Storage
 
                 // ✅ FIX: Improved DiskPart script with better error handling
                 var diskpartScript = $@"create vdisk file=""{tempVhdxPath}"" maximum={sizeMb} type=expandable
-select vdisk file=""{tempVhdxPath}""
-attach vdisk
-select vdisk file=""{tempVhdxPath}""
-create partition primary
-format fs=ntfs quick label=""{disk.Name}""
-assign letter={driveLetter}
-exit";
+                    select vdisk file=""{tempVhdxPath}""
+                    attach vdisk
+                    select vdisk file=""{tempVhdxPath}""
+                    create partition primary
+                    format fs=ntfs quick label=""{disk.Name}""
+                    assign letter={driveLetter}
+                    exit";
 
                 await File.WriteAllTextAsync(tempScriptPath, diskpartScript);
 

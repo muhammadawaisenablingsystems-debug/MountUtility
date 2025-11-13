@@ -1,6 +1,6 @@
 ﻿using DiskMountUtility.Core.Interfaces;
+using DiskMountUtility.Core.Enums;
 using LibOQS.NET;
-using System;
 using System.Security.Cryptography;
 using System.Text.Json;
 
@@ -14,13 +14,97 @@ namespace DiskMountUtility.Infrastructure.Cryptography
         private const int Iterations = 100_000;
         private const int TagSize = 16;
 
-        // Generate Kyber Key Pair
+        // Generate Kyber Key Pair (existing)
         public (byte[] publicKey, byte[] secretKey) GenerateKyberKeyPair()
         {
             using var kem = new KemInstance(KemAlgorithm.Kyber1024);
             return kem.GenerateKeypair();
         }
 
+        // New: Generate ECDH P-256 key pair (public: X||Y, private: D)
+        public (byte[] publicKey, byte[] secretKey) GenerateEcdhKeyPair()
+        {
+            using var ecdh = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);
+            var parameters = ecdh.ExportParameters(true);
+
+            if (parameters.Q.X == null || parameters.Q.Y == null || parameters.D == null)
+                throw new InvalidOperationException("ECDH parameters invalid.");
+
+            var pub = new byte[parameters.Q.X.Length + parameters.Q.Y.Length];
+            Buffer.BlockCopy(parameters.Q.X, 0, pub, 0, parameters.Q.X.Length);
+            Buffer.BlockCopy(parameters.Q.Y, 0, pub, parameters.Q.X.Length, parameters.Q.Y.Length);
+
+            var priv = parameters.D; // D length should be 32 bytes for P-256
+
+            return (pub, priv);
+        }
+
+        // ECDH encapsulation: given recipient public key (X||Y) produce ephemeralPublic (X||Y) and sharedSecret
+        public (byte[] ephemeralPublic, byte[] sharedSecret) EncapsulateEcdh(byte[] recipientPublicKey)
+        {
+            if (recipientPublicKey == null) throw new ArgumentNullException(nameof(recipientPublicKey));
+            int coordLen = recipientPublicKey.Length / 2;
+            var recipientParams = new ECParameters
+            {
+                Curve = ECCurve.NamedCurves.nistP256,
+                Q = new ECPoint
+                {
+                    X = new byte[coordLen],
+                    Y = new byte[coordLen]
+                }
+            };
+            Buffer.BlockCopy(recipientPublicKey, 0, recipientParams.Q.X, 0, coordLen);
+            Buffer.BlockCopy(recipientPublicKey, coordLen, recipientParams.Q.Y, 0, coordLen);
+
+            using var ephemeral = ECDiffieHellman.Create(ECCurve.NamedCurves.nistP256);
+            var ephemeralParams = ephemeral.ExportParameters(true);
+            var ephemeralPub = new byte[ephemeralParams.Q.X.Length + ephemeralParams.Q.Y.Length];
+            Buffer.BlockCopy(ephemeralParams.Q.X, 0, ephemeralPub, 0, ephemeralParams.Q.X.Length);
+            Buffer.BlockCopy(ephemeralParams.Q.Y, 0, ephemeralPub, ephemeralParams.Q.X.Length, ephemeralParams.Q.Y.Length);
+
+            using var recipientCandidate = ECDiffieHellman.Create();
+            recipientCandidate.ImportParameters(recipientParams);
+
+            var shared = ephemeral.DeriveKeyMaterial(recipientCandidate.PublicKey);
+            return (ephemeralPub, shared);
+        }
+
+        // ECDH decapsulation: given recipientPrivate (D) and sender ephemeralPublic (X||Y), derive sharedSecret
+        public byte[] DecapsulateEcdh(byte[] recipientPrivateKey, byte[] senderEphemeralPublic)
+        {
+            if (recipientPrivateKey == null) throw new ArgumentNullException(nameof(recipientPrivateKey));
+            if (senderEphemeralPublic == null) throw new ArgumentNullException(nameof(senderEphemeralPublic));
+
+            int coordLen = senderEphemeralPublic.Length / 2;
+            var senderParams = new ECParameters
+            {
+                Curve = ECCurve.NamedCurves.nistP256,
+                Q = new ECPoint
+                {
+                    X = new byte[coordLen],
+                    Y = new byte[coordLen]
+                }
+            };
+            Buffer.BlockCopy(senderEphemeralPublic, 0, senderParams.Q.X, 0, coordLen);
+            Buffer.BlockCopy(senderEphemeralPublic, coordLen, senderParams.Q.Y, 0, coordLen);
+
+            var recipientParams = new ECParameters
+            {
+                Curve = ECCurve.NamedCurves.nistP256,
+                D = recipientPrivateKey
+            };
+
+            using var recipient = ECDiffieHellman.Create();
+            recipient.ImportParameters(recipientParams);
+
+            using var senderPublicOnly = ECDiffieHellman.Create();
+            senderPublicOnly.ImportParameters(senderParams);
+
+            var shared = recipient.DeriveKeyMaterial(senderPublicOnly.PublicKey);
+            return shared;
+        }
+
+        // Existing Kyber EncryptData (unchanged)
         public byte[] EncryptData(
             byte[] data,
             string password,
@@ -62,8 +146,66 @@ namespace DiskMountUtility.Infrastructure.Cryptography
             return encryptedData;
         }
 
+        // New: Encrypt data with ECDH recipient public key
+        public byte[] EncryptDataEcdh(byte[] data, string password, byte[] recipientPublicKey, out byte[] ephemeralPublic, out byte[] nonce, byte[] salt)
+        {
+            nonce = RandomNumberGenerator.GetBytes(NonceSize);
 
-        // Decrypt data using stored Kyber secret key
+            var (ephemeral, sharedSecret) = EncapsulateEcdh(recipientPublicKey);
+            ephemeralPublic = ephemeral;
+
+            var aesKey = DeriveKey(password, salt, sharedSecret);
+
+            var ciphertext = new byte[data.Length];
+            var tag = new byte[TagSize];
+            using (var aesGcm = new AesGcm(aesKey))
+                aesGcm.Encrypt(nonce, data, ciphertext, tag);
+
+            var encryptedData = new byte[ciphertext.Length + tag.Length];
+            Buffer.BlockCopy(ciphertext, 0, encryptedData, 0, ciphertext.Length);
+            Buffer.BlockCopy(tag, 0, encryptedData, ciphertext.Length, tag.Length);
+
+            return encryptedData;
+        }
+
+        // New: Decrypt data encrypted by EncryptDataEcdh
+        public byte[] DecryptDataEcdh(byte[] encryptedData, string password, byte[] senderEphemeralPublic, byte[] recipientPrivateKeyEncrypted, byte[] recipientPrivateKeyNonce, byte[] diskNonce, byte[] salt)
+        {
+            // Decrypt recipient private key (AES-GCM using password-derived key)
+            var passwordKey = DerivePasswordKey(password, salt);
+
+            if (recipientPrivateKeyEncrypted.Length < TagSize)
+                throw new InvalidOperationException("Encrypted recipient private key is too short.");
+
+            var ct = new byte[recipientPrivateKeyEncrypted.Length - TagSize];
+            var tag = new byte[TagSize];
+            Buffer.BlockCopy(recipientPrivateKeyEncrypted, 0, ct, 0, ct.Length);
+            Buffer.BlockCopy(recipientPrivateKeyEncrypted, ct.Length, tag, 0, tag.Length);
+
+            var recipientPrivate = new byte[ct.Length];
+            using (var aesGcm = new AesGcm(passwordKey))
+                aesGcm.Decrypt(recipientPrivateKeyNonce, ct, tag, recipientPrivate);
+
+            // Derive shared secret
+            var sharedSecret = DecapsulateEcdh(recipientPrivate, senderEphemeralPublic);
+            var aesKey = DeriveKey(password, salt, sharedSecret);
+
+            if (encryptedData.Length < TagSize)
+                throw new InvalidOperationException("Encrypted data too short.");
+
+            var ciphertext = new byte[encryptedData.Length - TagSize];
+            var dataTag = new byte[TagSize];
+            Buffer.BlockCopy(encryptedData, 0, ciphertext, 0, ciphertext.Length);
+            Buffer.BlockCopy(encryptedData, ciphertext.Length, dataTag, 0, dataTag.Length);
+
+            var plaintext = new byte[ciphertext.Length];
+            using var aesGcm2 = new AesGcm(aesKey);
+            aesGcm2.Decrypt(diskNonce, ciphertext, dataTag, plaintext);
+
+            return plaintext;
+        }
+
+        // Decrypt data using stored Kyber secret key (existing)
         public byte[] DecryptData(
             byte[] encryptedData,
             string password,
@@ -175,7 +317,8 @@ namespace DiskMountUtility.Infrastructure.Cryptography
             using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
 
-            // Extract metadata
+            // This method historically only supported Kyber-style file format.
+            // Keep existing Kyber-centric extraction for backward compatibility.
             if (!root.TryGetProperty("metadata", out var metaEl))
                 throw new InvalidDataException("Vault metadata missing.");
 
@@ -193,15 +336,12 @@ namespace DiskMountUtility.Infrastructure.Cryptography
             byte[] diskNonce = Convert.FromBase64String(b64Nonce);
             byte[] salt = Convert.FromBase64String(b64Salt);
 
-            // Extract encrypted content
             if (!root.TryGetProperty("encryptedContent", out var encEl))
                 throw new InvalidDataException("encryptedContent missing.");
 
             string b64EncryptedContent = encEl.GetString() ?? throw new InvalidDataException("encryptedContent empty");
             byte[] encryptedContent = Convert.FromBase64String(b64EncryptedContent);
 
-            // Verify password via caller (optional): caller should have validated password earlier.
-            // Now perform decryption using existing DecryptData method
             byte[] decrypted = DecryptData(
                 encryptedContent,
                 password,

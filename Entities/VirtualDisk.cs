@@ -13,8 +13,7 @@ public class VirtualDisk
     public DiskStatus Status { get; set; }
     public EncryptionAlgorithm EncryptionAlgorithm { get; set; }
     public string FilePath { get; set; } = string.Empty;
-    [NotMapped]
-    public string TempMountPath {  get; set; } = string.Empty;
+    public string? TempMountPath {  get; set; } = string.Empty;
     public DateTime CreatedAt { get; set; }
     public DateTime? LastMountedAt { get; set; }
     public DateTime? LastModifiedAt { get; set; }

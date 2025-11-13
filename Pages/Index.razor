@@ -11,7 +11,16 @@
 
 <PageTitle>Disk Mount Utility</PageTitle>
 
-@if (!isVaultUnlocked)
+@if (!_initialized)
+{
+    <div style="display: flex; justify-content: center; align-items: center; height: 100vh;">
+        <div style="text-align: center;">
+            <h2>Loading...</h2>
+            <p>Initializing vault...</p>
+        </div>
+    </div>
+}
+else if (!isVaultUnlocked)
 {
     <div class="modal-overlay">
         <div class="modal" @onclick:stopPropagation="true">
@@ -32,106 +41,108 @@
         </div>
     </div>
 }
+else
+{
+    <div class="container">
+        <div class="header">
+            <h1>Virtual Disk Manager</h1>
+            <p>Secure disk management with post-quantum cryptography</p>
+        </div>
 
-<div class="container">
-    <div class="header">
-        <h1>Virtual Disk Manager</h1>
-        <p>Secure disk management with post-quantum cryptography</p>
-    </div>
-
-    <div class="main-content">
-        @if (mountedDisk != null)
-        {
-            <div class="mounted-disk-section">
-                <div class="section-header">
-                    <h2>Mounted Disk: @mountedDisk.Name</h2>
-                    <button class="btn btn-danger" @onclick="UnmountDisk">Unmount</button>
-                </div>
-
-                <div class="disk-card mounted">
-                    <div class="disk-info">
-                        <h3>@mountedDisk.Name</h3>
-                        <div class="disk-stats">
-                            <div class="stat">
-                                <span class="label">Size:</span>
-                                <span class="value">@FormatBytes(mountedDisk.SizeInBytes)</span>
-                            </div>
-                            <div class="stat">
-                                <span class="label">Used:</span>
-                                <span class="value">@FormatBytes(mountedDisk.UsedSpaceInBytes)</span>
-                            </div>
-                            <div class="stat">
-                                <span class="label">Free:</span>
-                                <span class="value">@FormatBytes(mountedDisk.FreeSpaceInBytes)</span>
-                            </div>
-                        </div>
-                        <div class="usage-bar">
-                            <div class="usage-fill" style="width: @mountedDisk.UsagePercentage%"></div>
-                        </div>
-                        <p class="usage-text">@mountedDisk.UsagePercentage.ToString("F2")% used</p>
-                    </div>
-                    <div class="disk-actions">
-                        <button class="btn btn-primary" @onclick="NavigateToFileExplorer">Browse Files</button>
-                        <button class="btn btn-secondary" @onclick="() => ShowResizeDialog(mountedDisk)">Resize Disk</button>
-                    </div>
-                </div>
-            </div>
-        }
-        else
-        {
-            <div class="no-disk-section">
-                <div class="empty-state">
-                    <h2>No Disk Mounted</h2>
-                    <p>Create a new virtual disk or mount an existing one</p>
-                </div>
-            </div>
-        }
-
-        <div class="disks-section">
-            <div class="section-header">
-                <h2>Available Disks</h2>
-                <button class="btn btn-success" @onclick="ShowCreateDialog">Create New Disk</button>
-            </div>
-
-            @if (disks.Any())
+        <div class="main-content">
+            @if (mountedDisk != null)
             {
-                <div class="disks-grid">
-                    @foreach (var disk in disks)
-                    {
-                        <div class="disk-card @(disk.Status == "Mounted" ? "mounted" : "")">
-                            <div class="disk-info">
-                                <h3>@disk.Name</h3>
-                                <span class="status-badge status-@disk.Status.ToLower()">@disk.Status</span>
-                                <div class="disk-stats">
-                                    <div class="stat">
-                                        <span class="label">Size:</span>
-                                        <span class="value">@FormatBytes(disk.SizeInBytes)</span>
-                                    </div>
-                                    <div class="stat">
-                                        <span class="label">Created:</span>
-                                        <span class="value">@disk.CreatedAt.ToLocalTime().ToString("g")</span>
-                                    </div>
+                <div class="mounted-disk-section">
+                    <div class="section-header">
+                        <h2>Mounted Disk: @mountedDisk.Name</h2>
+                        <button class="btn btn-danger" @onclick="UnmountDisk">Unmount</button>
+                    </div>
+
+                    <div class="disk-card mounted">
+                        <div class="disk-info">
+                            <h3>@mountedDisk.Name</h3>
+                            <div class="disk-stats">
+                                <div class="stat">
+                                    <span class="label">Size:</span>
+                                    <span class="value">@FormatBytes(mountedDisk.SizeInBytes)</span>
+                                </div>
+                                <div class="stat">
+                                    <span class="label">Used:</span>
+                                    <span class="value">@FormatBytes(mountedDisk.UsedSpaceInBytes)</span>
+                                </div>
+                                <div class="stat">
+                                    <span class="label">Free:</span>
+                                    <span class="value">@FormatBytes(mountedDisk.FreeSpaceInBytes)</span>
                                 </div>
                             </div>
-                            @if (disk.Status != "Mounted")
-                            {
-                                <div class="disk-actions-centered">
-                                    <button class="btn btn-primary" @onclick="() => ShowMountDialog(disk.Id)">Mount</button>
-                                    <button class="btn btn-secondary" @onclick="() => ShowResizeDialog(disk)">Resize</button>
-                                    <button class="btn btn-danger" @onclick="() => DeleteDisk(disk.Id)">Delete</button>
-                                </div>
-                            }
+                            <div class="usage-bar">
+                                <div class="usage-fill" style="width: @mountedDisk.UsagePercentage%"></div>
+                            </div>
+                            <p class="usage-text">@mountedDisk.UsagePercentage.ToString("F2")% used</p>
                         </div>
-                    }
+                        <div class="disk-actions">
+                            <button class="btn btn-primary" @onclick="NavigateToFileExplorer">Browse Files</button>
+                            <button class="btn btn-secondary" @onclick="() => ShowResizeDialog(mountedDisk)">Resize Disk</button>
+                        </div>
+                    </div>
                 </div>
             }
             else
             {
-                <p class="no-disks">No virtual disks created yet</p>
+                <div class="no-disk-section">
+                    <div class="empty-state">
+                        <h2>No Disk Mounted</h2>
+                        <p>Create a new virtual disk or mount an existing one</p>
+                    </div>
+                </div>
             }
+
+            <div class="disks-section">
+                <div class="section-header">
+                    <h2>Available Disks</h2>
+                    <button class="btn btn-success" @onclick="ShowCreateDialog">Create New Disk</button>
+                </div>
+
+                @if (disks.Any())
+                {
+                    <div class="disks-grid">
+                        @foreach (var disk in disks)
+                        {
+                            <div class="disk-card @(disk.Status == "Mounted" ? "mounted" : "")">
+                                <div class="disk-info">
+                                    <h3>@disk.Name</h3>
+                                    <span class="status-badge status-@disk.Status.ToLower()">@disk.Status</span>
+                                    <div class="disk-stats">
+                                        <div class="stat">
+                                            <span class="label">Size:</span>
+                                            <span class="value">@FormatBytes(disk.SizeInBytes)</span>
+                                        </div>
+                                        <div class="stat">
+                                            <span class="label">Created:</span>
+                                            <span class="value">@disk.CreatedAt.ToLocalTime().ToString("g")</span>
+                                        </div>
+                                    </div>
+                                </div>
+                                @if (disk.Status != "Mounted")
+                                {
+                                    <div class="disk-actions-centered">
+                                        <button class="btn btn-primary" @onclick="() => ShowMountDialog(disk.Id)">Mount</button>
+                                        <button class="btn btn-secondary" @onclick="() => ShowResizeDialog(disk)">Resize</button>
+                                        <button class="btn btn-danger" @onclick="() => DeleteDisk(disk.Id)">Delete</button>
+                                    </div>
+                                }
+                            </div>
+                        }
+                    </div>
+                }
+                else
+                {
+                    <p class="no-disks">No virtual disks created yet</p>
+                }
+            </div>
         </div>
     </div>
-</div>
+}
 
 @if (showCreateDialog)
 {
@@ -220,6 +231,18 @@
     </div>
 }
 
+
+@* Add a visible test link/button (temporary) somewhere in the page UI so you can click it manually: *@
+
+
+@if (!VaultKeyManager.HasSavedSelection())
+{
+    <div class="mt-3">
+        <p>No KEX chosen yet for this profile. Click to choose now:</p>
+        <a class="btn btn-outline-primary" href="/firstrun">Open First Run</a>
+    </div>
+}
+
 <style>
     .disk-actions-centered {
         display: flex;
@@ -257,11 +280,46 @@
 
     private Guid? _mountedDiskId;
     private string? _mountedDiskPassword;
+    private bool _hasCheckedSettings = false;
+
+    protected override void OnInitialized()
+    {
+        Console.WriteLine($"[Index] OnInitialized - Starting");
+        Console.WriteLine($"[Index] Current URL: {Navigation.Uri}");
+
+        // Force reload settings from disk
+        VaultKeyManager.LoadSettingsIfExists();
+
+        bool hasSettings = VaultKeyManager.HasSavedSelection();
+        Console.WriteLine($"[Index] Has saved selection: {hasSettings}");
+
+        // Use client navigation (do not force full page load)
+        if (!hasSettings)
+        {
+            Console.WriteLine($"[Index] No settings found - navigating to /firstrun");
+            Navigation.NavigateTo("/firstrun"); // <-- client-side navigation
+            return;
+        }
+
+        Console.WriteLine($"[Index] Settings found - continuing with initialization");
+    }
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
         if (firstRender && !_initialized)
         {
+            Console.WriteLine($"[Index] OnAfterRenderAsync - firstRender={firstRender}");
+
+            // Re-check settings in case they were just saved
+            VaultKeyManager.LoadSettingsIfExists();
+
+            if (!VaultKeyManager.HasSavedSelection())
+            {
+                Console.WriteLine($"[Index] Still no settings after render, redirecting");
+                Navigation.NavigateTo("/firstrun", forceLoad: true);
+                return;
+            }
+
             try
             {
                 var vaultState = await SessionStorage.GetAsync<bool>("VaultUnlocked");
@@ -270,6 +328,7 @@
                 if (vaultState.Success && vaultState.Value &&
                     vaultPass.Success && !string.IsNullOrEmpty(vaultPass.Value))
                 {
+                    Console.WriteLine($"[Index] Found cached vault state, initializing");
                     VaultKeyManager.Initialize(vaultPass.Value);
                     isVaultUnlocked = true;
 
@@ -286,7 +345,7 @@
 
                         if (mountedDisk == null)
                         {
-                            Console.WriteLine($"🔄 Restoring mounted disk: {_mountedDiskId}");
+                            Console.WriteLine($"[Index] Restoring mounted disk: {_mountedDiskId}");
                             var success = await DiskService.MountDiskAsync(new MountDiskRequest
                             {
                                 DiskId = _mountedDiskId.Value,
@@ -296,7 +355,7 @@
                             if (success)
                             {
                                 await LoadDisks();
-                                Console.WriteLine("✅ Disk restored successfully");
+                                Console.WriteLine($"[Index] Disk restored successfully");
                             }
                             else
                             {
@@ -306,16 +365,20 @@
                         }
                         else
                         {
-                            Console.WriteLine("✅ Disk already mounted, skipping re-mount");
+                            Console.WriteLine($"[Index] Disk already mounted, skipping re-mount");
                         }
                     }
 
                     await LoadDisks();
                 }
+                else
+                {
+                    Console.WriteLine($"[Index] No cached vault state found");
+                }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Vault restore failed: {ex.Message}");
+                Console.WriteLine($"[Index] Vault restore failed: {ex.Message}");
                 isVaultUnlocked = false;
             }
 
@@ -334,7 +397,7 @@
         catch (Exception ex)
         {
             errorMessage = $"Failed to load disks: {ex.Message}";
-            Console.WriteLine($"LoadDisks error: {ex.Message}");
+            Console.WriteLine($"[Index] LoadDisks error: {ex.Message}");
         }
     }
 

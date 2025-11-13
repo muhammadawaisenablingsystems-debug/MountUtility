@@ -1,0 +1,62 @@
+﻿@page "/firstrun"
+@using DiskMountUtility.Infrastructure.Cryptography
+@using MountUtility.Enums
+@inject NavigationManager Navigation
+
+<div class="container mt-5">
+    <div class="card">
+        <div class="card-body">
+            <h2>Welcome to Disk Mount Utility</h2>
+            <p>Choose your preferred key-exchange algorithm:</p>
+
+            <div class="mb-3">
+                <label class="form-label">Key-exchange algorithm</label>
+
+                <div class="form-check">
+                    <input type="radio" id="kyber" name="kex" value="Kyber" checked />
+                    <label for="kyber">Kyber 1024 (Post-Quantum, Recommended)</label>
+                </div>
+
+                <div class="form-check">
+                    <input type="radio" id="ecdh" name="kex" value="ECDH" />
+                    <label for="ecdh">ECDH P-256 (Classical, Faster)</label>
+                </div>
+            </div>
+
+            <div class="mt-3">
+                <button class="btn btn-primary" onclick="saveSelection()">Save and Continue</button>
+            </div>
+
+            <div id="errorMessage" class="alert alert-danger mt-2" style="display:none;"></div>
+        </div>
+    </div>
+</div>
+
+<script>
+    function saveSelection() {
+        const radios = document.getElementsByName('kex');
+        let selectedValue = null;
+        for (const r of radios) {
+            if (r.checked) {
+                selectedValue = r.value;
+                break;
+            }
+        }
+
+        if (!selectedValue) {
+            const err = document.getElementById('errorMessage');
+            err.textContent = 'Please select an algorithm!';
+            err.style.display = 'block';
+            return;
+        }
+
+        // Call Blazor method via JS interop
+        DotNet.invokeMethodAsync('MountUtility', 'SaveKexSelection', selectedValue)
+        .then(() => window.location.href = '/')
+        .catch(err => {
+            const errorDiv = document.getElementById('errorMessage');
+            errorDiv.textContent = 'Error saving selection: ' + err;
+            errorDiv.style.display = 'block';
+        });
+    }
+</script>

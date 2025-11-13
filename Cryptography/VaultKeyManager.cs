@@ -1,19 +1,22 @@
-﻿using System;
-using System.IO;
+﻿using MountUtility.Enums;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 
 namespace DiskMountUtility.Infrastructure.Cryptography
 {
     public static class VaultKeyManager
     {
         private const string ProtectedPasswordFile = "vaultpw.bin";
-        private static readonly string PasswordPath = Path.Combine(
+        private const string SettingsFile = "vaultsettings.json";
+        private static readonly string DataFolder = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-            "DiskMountUtility",
-            ProtectedPasswordFile);
+            "DiskMountUtility");
+        private static readonly string PasswordPath = Path.Combine(DataFolder, ProtectedPasswordFile);
+        private static readonly string SettingsPath = Path.Combine(DataFolder, SettingsFile);
 
         private static string? _cachedPassword;
+        private static KeyExchangeAlgorithm _selectedAlgorithm = KeyExchangeAlgorithm.Kyber;
 
         public static bool IsInitialized => !string.IsNullOrEmpty(_cachedPassword);
 
@@ -48,6 +51,22 @@ namespace DiskMountUtility.Infrastructure.Cryptography
             var protectedBytes = File.ReadAllBytes(PasswordPath);
             var plainBytes = ProtectedData.Unprotect(protectedBytes, null, DataProtectionScope.CurrentUser);
             _cachedPassword = Encoding.UTF8.GetString(plainBytes);
+
+            // Load settings (if any)
+            if (File.Exists(SettingsPath))
+            {
+                try
+                {
+                    var json = File.ReadAllText(SettingsPath);
+                    var doc = JsonSerializer.Deserialize<UserVaultSettings>(json);
+                    if (doc != null)
+                        _selectedAlgorithm = doc.SelectedKeyExchange;
+                }
+                catch
+                {
+                    // ignore settings errors
+                }
+            }
         }
 
         /// <summary>
@@ -63,6 +82,68 @@ namespace DiskMountUtility.Infrastructure.Cryptography
         public static void Clear()
         {
             _cachedPassword = null;
+        }
+
+        // --- Key exchange selection persistence ---
+
+        public static KeyExchangeAlgorithm SelectedKeyExchange
+        {
+            get => _selectedAlgorithm;
+            set
+            {
+                _selectedAlgorithm = value;
+                SaveSettings();
+            }
+        }
+
+        private static void SaveSettings()
+        {
+            try
+            {
+                Directory.CreateDirectory(DataFolder);
+                var settings = new UserVaultSettings { SelectedKeyExchange = _selectedAlgorithm };
+                var json = JsonSerializer.Serialize(settings);
+                File.WriteAllText(SettingsPath, json);
+            }
+            catch
+            {
+                // best-effort save; ignore errors to not interrupt UI flows
+            }
+        }
+
+        // Return true if user has previously saved an explicit key-exchange choice
+        public static bool HasSavedSelection()
+        {
+            try
+            {
+                return File.Exists(SettingsPath);
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        // Load settings if present (non-throwing)
+        public static void LoadSettingsIfExists()
+        {
+            try
+            {
+                if (!File.Exists(SettingsPath)) return;
+                var json = File.ReadAllText(SettingsPath);
+                var doc = JsonSerializer.Deserialize<UserVaultSettings>(json);
+                if (doc != null)
+                    _selectedAlgorithm = doc.SelectedKeyExchange;
+            }
+            catch
+            {
+                // ignore
+            }
+        }
+
+        private class UserVaultSettings
+        {
+            public KeyExchangeAlgorithm SelectedKeyExchange { get; set; } = KeyExchangeAlgorithm.Kyber;
         }
     }
 }
