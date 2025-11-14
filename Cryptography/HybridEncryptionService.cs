@@ -169,10 +169,12 @@ namespace DiskMountUtility.Infrastructure.Cryptography
         }
 
         // New: Decrypt data encrypted by EncryptDataEcdh
-        public byte[] DecryptDataEcdh(byte[] encryptedData, string password, byte[] senderEphemeralPublic, byte[] recipientPrivateKeyEncrypted, byte[] recipientPrivateKeyNonce, byte[] diskNonce, byte[] salt)
+        // NOTE: diskSalt (salt used at disk creation) is used to derive the password key to decrypt the stored recipient private key.
+        //       fileSalt (per-file salt) is used to derive the AES key for the file contents.
+        public byte[] DecryptDataEcdh(byte[] encryptedData, string password, byte[] senderEphemeralPublic, byte[] recipientPrivateKeyEncrypted, byte[] recipientPrivateKeyNonce, byte[] diskNonce, byte[] diskSalt, byte[] fileSalt)
         {
-            // Decrypt recipient private key (AES-GCM using password-derived key)
-            var passwordKey = DerivePasswordKey(password, salt);
+            // Decrypt recipient private key (AES-GCM using password-derived key derived from diskSalt)
+            var passwordKey = DerivePasswordKey(password, diskSalt);
 
             if (recipientPrivateKeyEncrypted.Length < TagSize)
                 throw new InvalidOperationException("Encrypted recipient private key is too short.");
@@ -186,9 +188,11 @@ namespace DiskMountUtility.Infrastructure.Cryptography
             using (var aesGcm = new AesGcm(passwordKey))
                 aesGcm.Decrypt(recipientPrivateKeyNonce, ct, tag, recipientPrivate);
 
-            // Derive shared secret
+            // Derive shared secret (ECDH)
             var sharedSecret = DecapsulateEcdh(recipientPrivate, senderEphemeralPublic);
-            var aesKey = DeriveKey(password, salt, sharedSecret);
+
+            // Derive AES content key using per-file salt (fileSalt) + sharedSecret
+            var aesKey = DeriveKey(password, fileSalt, sharedSecret);
 
             if (encryptedData.Length < TagSize)
                 throw new InvalidOperationException("Encrypted data too short.");

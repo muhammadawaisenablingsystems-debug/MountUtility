@@ -521,15 +521,26 @@ namespace DiskMountUtility.Infrastructure.Storage
                     if (_mountedDisk.EncryptionAlgorithm == EncryptionAlgorithm.EcdhP256AesGcm256)
                     {
                         // ECDH decryption path
-                        decrypted = _cryptographyService.DecryptDataEcdh(
-                            file.EncryptedContent,
-                            password,
-                            file.EcdhEphemeralPublic ?? Array.Empty<byte>(),
-                            metadata.EcdhPrivateKeyEncrypted ?? Array.Empty<byte>(),
-                            metadata.EcdhPrivateKeyNonce ?? Array.Empty<byte>(),
-                            file.FileNonce ?? Array.Empty<byte>(),
-                            file.Salt ?? Array.Empty<byte>()
-                        );
+                        try
+                        {
+                            // IMPORTANT: use disk-level salt (metadata.Salt) to derive password key for decrypting recipient private key.
+                            // Passing per-file salt here caused wrong key derivation and AES-GCM tag mismatch.
+                            decrypted = _cryptographyService.DecryptDataEcdh(
+                                file.EncryptedContent,
+                                password,
+                                file.EcdhEphemeralPublic ?? Array.Empty<byte>(),
+                                metadata.EcdhPrivateKeyEncrypted ?? Array.Empty<byte>(),
+                                metadata.EcdhPrivateKeyNonce ?? Array.Empty<byte>(),
+                                file.FileNonce ?? Array.Empty<byte>(),          // diskNonce
+                                metadata.Salt ?? Array.Empty<byte>(),           // diskSalt (used to derive password key to decrypt recipient private key)
+                                file.Salt ?? Array.Empty<byte>()                // fileSalt (used to derive AES key for file content)
+                            );
+                        }
+                        catch (CryptographicException cex)
+                        {
+                            Console.WriteLine($"❌ ECDH decrypt failed (cryptographic/tag error): {cex.Message}. lengths: enc={file.EncryptedContent?.Length}, eph={file.EcdhEphemeralPublic?.Length}, privEnc={metadata.EcdhPrivateKeyEncrypted?.Length}, privNonce={metadata.EcdhPrivateKeyNonce?.Length}, fileNonce={file.FileNonce?.Length}, diskSalt={metadata.Salt?.Length}");
+                            throw;
+                        }
                     }
                     else
                     {
@@ -832,15 +843,25 @@ namespace DiskMountUtility.Infrastructure.Storage
                             if (disk.EncryptionAlgorithm == EncryptionAlgorithm.EcdhP256AesGcm256)
                             {
                                 // ECDH decryption
-                                decrypted = _cryptographyService.DecryptDataEcdh(
-                                    file.EncryptedContent ?? Array.Empty<byte>(),
-                                    _mountedDiskPassword ?? string.Empty,
-                                    file.EcdhEphemeralPublic ?? Array.Empty<byte>(),
-                                    metadata.EcdhPrivateKeyEncrypted ?? Array.Empty<byte>(),
-                                    metadata.EcdhPrivateKeyNonce ?? Array.Empty<byte>(),
-                                    file.FileNonce ?? Array.Empty<byte>(),
-                                    file.Salt ?? Array.Empty<byte>()
-                                );
+                                try
+                                {
+                                    // IMPORTANT: pass disk-level salt (metadata.Salt) when decrypting ECDH so the private key can be decrypted correctly.
+                                    decrypted = _cryptographyService.DecryptDataEcdh(
+                                        file.EncryptedContent ?? Array.Empty<byte>(),
+                                        _mountedDiskPassword ?? string.Empty,
+                                        file.EcdhEphemeralPublic ?? Array.Empty<byte>(),
+                                        metadata.EcdhPrivateKeyEncrypted ?? Array.Empty<byte>(),
+                                        metadata.EcdhPrivateKeyNonce ?? Array.Empty<byte>(),
+                                        file.FileNonce ?? Array.Empty<byte>(),          // diskNonce
+                                        metadata.Salt ?? Array.Empty<byte>(),           // diskSalt
+                                        file.Salt ?? Array.Empty<byte>()                // fileSalt
+                                    );
+                                }
+                                catch (CryptographicException cex)
+                                {
+                                    Console.WriteLine($"⚠️ ECDH decrypt failed for '{file.Path}': {cex.Message}. lengths -> enc={file.EncryptedContent?.Length}, eph={file.EcdhEphemeralPublic?.Length}, privEnc={metadata.EcdhPrivateKeyEncrypted?.Length}, diskSalt={metadata.Salt?.Length}");
+                                    decrypted = Array.Empty<byte>();
+                                }
                             }
                             else
                             {
@@ -919,7 +940,7 @@ namespace DiskMountUtility.Infrastructure.Storage
                     return false;
                 }
 
-                var driveRoot = $"{driveLetter}:\\";
+                var driveRoot = $"{driveLetter}:\\"; 
                 var timeout = DateTime.UtcNow.AddSeconds(15);
 
                 while (!Directory.Exists(driveRoot) && DateTime.UtcNow < timeout)
@@ -942,8 +963,8 @@ namespace DiskMountUtility.Infrastructure.Storage
 
                 MountedVaultPath = driveRoot;
 
-                Console.WriteLine($"✅ Vault mounted as physical drive {driveLetter}:\\");
-                return true;
+                Console.WriteLine($"✅ Vault mounted as physical drive {driveLetter}:\\")
+;                return true;
             }
             catch (Exception ex)
             {
