@@ -16,10 +16,10 @@ namespace DiskMountUtility.Infrastructure.Storage
         private readonly ICryptographyService _cryptographyService;
         private readonly IDiskRepository _diskRepository;
         private readonly string _diskStoragePath;
-        private VirtualDisk? _mountedDisk;
-        private Dictionary<string, DiskFile> _mountedDiskFiles = new();
+        private static VirtualDisk? _mountedDisk;
+        private static Dictionary<string, DiskFile> _mountedDiskFiles = new();
         public string? MountedVaultPath { get; private set; }
-        private string? _mountedDiskPassword;
+        private static string? _mountedDiskPassword;
         private const int NonceSize = 12;
 
         // ✅ Track VHDX handle to properly dispose

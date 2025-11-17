@@ -59,4 +59,32 @@ using (var scope = app.Services.CreateScope())
 app.MapBlazorHub();
 app.MapFallbackToPage("/_Host");
 
+app.MapGet("/api/files/download", async (Guid diskId, string path, DiskManagementService diskService, ILogger<Program> logger) =>
+{
+    if (diskId == Guid.Empty || string.IsNullOrEmpty(path))
+        return Results.BadRequest("diskId and path are required.");
+
+    try
+    {
+        var stream = await diskService.OpenFileStreamAsync(diskId, path);
+        if (stream == null)
+            return Results.NotFound();
+
+        var fileName = Path.GetFileName(path) ?? "download.bin";
+        var contentType = "application/octet-stream";
+
+        return Results.Stream(
+            stream,
+            contentType,
+            fileName,
+            enableRangeProcessing: true
+        );
+    }
+    catch (Exception ex)
+    {
+        logger.LogError(ex, "Download failed for diskId={DiskId} path={Path}", diskId, path);
+        return Results.StatusCode(500);
+    }
+});
+
 app.Run();

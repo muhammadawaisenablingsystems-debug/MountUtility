@@ -419,5 +419,38 @@ namespace DiskMountUtility.Application.Services
                 Console.WriteLine($"❌ Error renaming metadata: {ex.Message}");
             }
         }
+
+        public async Task<Stream?> OpenFileStreamAsync(Guid diskId, string path)
+        {
+            // Validate
+            if (diskId == Guid.Empty || string.IsNullOrEmpty(path))
+                return null;
+
+            // Read & decrypt using existing API (this may buffer once during decryption)
+            var content = await ReadFileAsync(diskId, path);
+            if (content == null) return null;
+
+            try
+            {
+                var tempFile = Path.Combine(Path.GetTempPath(), $"vault_dl_{diskId:N}_{Guid.NewGuid():N}_{Path.GetFileName(path)}");
+                // ensure directory exists (TempPath always exists normally)
+                await File.WriteAllBytesAsync(tempFile, content).ConfigureAwait(false);
+
+                // Open with DeleteOnClose so temp file is removed when stream is disposed
+                var fs = new FileStream(
+                    tempFile,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.Read,
+                    bufferSize: 65536,
+                    options: FileOptions.Asynchronous | FileOptions.DeleteOnClose);
+
+                return fs;
+            }
+            catch
+            {
+                return null;
+            }
+        }
     }
 }
