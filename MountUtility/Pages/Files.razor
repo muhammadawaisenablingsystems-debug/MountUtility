@@ -1,5 +1,5 @@
 ﻿@page "/files"
-@using DiskMountUtility.Application.Services
+@using MountUtility.Services
 @using DiskMountUtility.Application.DTOs
 @using System.Text
 @using Microsoft.AspNetCore.Components.Forms
@@ -7,7 +7,6 @@
 @using Microsoft.AspNetCore.Components.Web
 @using Microsoft.JSInterop
 @using Microsoft.AspNetCore.StaticFiles;
-@using MountUtility.Services
 @inject ProtectedSessionStorage SessionStorage
 @inject DiskManagementService DiskService
 @inject NavigationManager Navigation

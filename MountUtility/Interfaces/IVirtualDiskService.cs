@@ -1,6 +1,6 @@
 ﻿using DiskMountUtility.Core.Entities;
 
-namespace DiskMountUtility.Core.Interfaces;
+namespace MountUtility.Interfaces;
 
 public interface IVirtualDiskService
 {

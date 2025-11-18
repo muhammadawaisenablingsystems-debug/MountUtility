@@ -7,7 +7,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace DiskMountUtility.Application.FileWatcher
+namespace MountUtility.FileWatcher
 {
     public class VaultFileWatcherService : IDisposable
     {

@@ -3,7 +3,7 @@ using System.Collections.Concurrent;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace DiskMountUtility.Application.Services
+namespace MountUtility.Services
 {
     public class RealtimeFileExplorerService : IDisposable
     {

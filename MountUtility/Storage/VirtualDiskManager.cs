@@ -1,9 +1,9 @@
 ﻿using DiskMountUtility.Core.Entities;
 using DiskMountUtility.Core.Enums;
-using DiskMountUtility.Core.Interfaces;
 using DiskMountUtility.Infrastructure.Cryptography;
 using Microsoft.Win32.SafeHandles;
 using MountUtility.Enums;
+using MountUtility.Interfaces;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;

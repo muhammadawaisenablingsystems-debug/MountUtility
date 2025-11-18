@@ -1,6 +1,6 @@
-﻿using DiskMountUtility.Application.FileWatcher;
-using DiskMountUtility.Core.Entities;
-using DiskMountUtility.Core.Interfaces;
+﻿using DiskMountUtility.Core.Entities;
+using MountUtility.FileWatcher;
+using MountUtility.Interfaces;
 using System.Collections.Concurrent;
 
 namespace MountUtility.Services

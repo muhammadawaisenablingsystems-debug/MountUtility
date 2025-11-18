@@ -1,4 +1,4 @@
-﻿using DiskMountUtility.Core.Interfaces;
+﻿using MountUtility.Interfaces;
 
 namespace DiskMountUtility.Infrastructure.Cryptography
 {

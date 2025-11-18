@@ -1,7 +1,7 @@
 ﻿using DiskMountUtility.Core.Entities;
 using DiskMountUtility.Core.Enums;
 
-namespace DiskMountUtility.Core.Interfaces;
+namespace MountUtility.Interfaces;
 
 public interface IDiskRepository
 {

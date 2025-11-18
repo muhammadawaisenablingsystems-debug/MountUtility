@@ -1,4 +1,4 @@
-﻿namespace DiskMountUtility.Core.Interfaces
+﻿namespace MountUtility.Interfaces
 {
     public interface ILocalDbUnlocker
     {

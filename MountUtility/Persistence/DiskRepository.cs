@@ -1,7 +1,7 @@
 ﻿using DiskMountUtility.Core.Entities;
 using DiskMountUtility.Core.Enums;
-using DiskMountUtility.Core.Interfaces;
 using Microsoft.EntityFrameworkCore;
+using MountUtility.Interfaces;
 
 namespace DiskMountUtility.Infrastructure.Persistence
 {

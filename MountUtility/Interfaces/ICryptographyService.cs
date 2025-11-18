@@ -1,6 +1,6 @@
 ﻿using System.Threading.Tasks;
 
-namespace DiskMountUtility.Core.Interfaces
+namespace MountUtility.Interfaces
 {
     public interface ICryptographyService
     {

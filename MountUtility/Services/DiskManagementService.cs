@@ -1,14 +1,13 @@
 ﻿using DiskMountUtility.Application.DTOs;
-using DiskMountUtility.Application.FileWatcher;
 using DiskMountUtility.Core.Entities;
-using DiskMountUtility.Core.Interfaces;
 using DiskMountUtility.Infrastructure.Cryptography;
 using DiskMountUtility.Infrastructure.Persistence;
 using Microsoft.EntityFrameworkCore;
-using MountUtility.Services;
+using MountUtility.FileWatcher;
+using MountUtility.Interfaces;
 using System;
 
-namespace DiskMountUtility.Application.Services
+namespace MountUtility.Services
 {
     public class DiskManagementService
     {
