@@ -26,16 +26,7 @@ namespace MountUtility.WPF
             _host = Host.CreateDefaultBuilder()
                 .ConfigureServices((context, services) =>
                 {
-                    services.AddDbContextFactory<AppDbContext>(options =>
-                    {
-                        var dbPath = System.IO.Path.Combine(
-                            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                            "DiskMountUtility", "vault.db");
-
-                        System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(dbPath)!);
-
-                        options.UseSqlite($"Data Source={dbPath}");
-                    });
+                    services.AddDbContextFactory<AppDbContext>();
 
                     services.AddSingleton<ICryptographyService, HybridEncryptionService>();
                     services.AddSingleton<ILocalDbUnlocker, LocalDbUnlocker>();
@@ -45,9 +36,9 @@ namespace MountUtility.WPF
                     services.AddSingleton<RealtimeVaultSyncService>();
                     services.AddSingleton<RealtimeFileExplorerService>();
                     services.AddSingleton<DiskManagementService>();
-                    services.AddSingleton<TrayIconService>();
 
                     services.AddSingleton<MainWindow>();
+                    services.AddSingleton<TrayIconService>();
                     services.AddSingleton<FirstRunWindow>();
                     services.AddSingleton<FileExplorerWindow>();
                 })
@@ -57,10 +48,6 @@ namespace MountUtility.WPF
             _trayIconService.Initialize();
 
             var diskManagement = _host.Services.GetRequiredService<DiskManagementService>();
-            Task.Run(async () =>
-            {
-                await diskManagement.EnsureDatabaseReadyAsync();
-            }).Wait();
 
             if (!VaultKeyManager.HasSavedSelection())
             {
