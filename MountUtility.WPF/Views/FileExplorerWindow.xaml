@@ -1,0 +1,109 @@
+﻿<Window x:Class="MountUtility.WPF.Views.FileExplorerWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="File Explorer"
+        Width="1000" Height="700"
+        WindowStartupLocation="CenterScreen">
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <Border Grid.Row="0" Background="#2C3E50" Padding="15">
+            <Grid>
+                <StackPanel VerticalAlignment="Center">
+                    <TextBlock x:Name="TitleText" Text="File Explorer"
+                               FontSize="20" Foreground="White" FontWeight="Bold"/>
+                </StackPanel>
+                <Button Content="Back to Dashboard" Click="BackToDashboard_Click"
+                        Style="{StaticResource SecondaryButton}"
+                        HorizontalAlignment="Right" Width="150" Height="35"/>
+            </Grid>
+        </Border>
+
+        <Border Grid.Row="1" Background="White" Padding="15" BorderBrush="#DDD" BorderThickness="0,0,0,1">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*"/>
+                    <ColumnDefinition Width="Auto"/>
+                </Grid.ColumnDefinitions>
+
+                <StackPanel Grid.Column="0" Orientation="Horizontal">
+                    <TextBlock Text="/" FontSize="14" VerticalAlignment="Center" Margin="0,0,5,0"/>
+                    <ItemsControl x:Name="BreadcrumbControl">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <StackPanel Orientation="Horizontal"/>
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="/" Margin="5,0"/>
+                                    <Button Content="{Binding Name}" Tag="{Binding Path}"
+                                            Click="BreadcrumbButton_Click"
+                                            Style="{StaticResource LinkButton}"/>
+                                </StackPanel>
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+                </StackPanel>
+
+                <StackPanel Grid.Column="1" Orientation="Horizontal">
+                    <Button Content="Upload File" Click="ShowUploadDialog_Click"
+                            Style="{StaticResource PrimaryButton}"
+                            Width="100" Height="30" Margin="0,0,5,0"/>
+                    <Button Content="New Folder" Click="ShowCreateFolderDialog_Click"
+                            Style="{StaticResource SecondaryButton}"
+                            Width="100" Height="30" Margin="0,0,5,0"/>
+                    <Button Content="Refresh" Click="RefreshFiles_Click"
+                            Width="80" Height="30"/>
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <Border Grid.Row="2" Background="White">
+            <Grid>
+                <DataGrid x:Name="FilesDataGrid"
+                          AutoGenerateColumns="False"
+                          IsReadOnly="True"
+                          GridLinesVisibility="Horizontal"
+                          HeadersVisibility="Column"
+                          SelectionMode="Single"
+                          CanUserResizeRows="False"
+                          CanUserSortColumns="True"
+                          MouseDoubleClick="FilesDataGrid_MouseDoubleClick">
+                    <DataGrid.Columns>
+                        <DataGridTextColumn Header="Name" Binding="{Binding DisplayName}" Width="*"/>
+                        <DataGridTextColumn Header="Size" Binding="{Binding FormattedSize}" Width="100"/>
+                        <DataGridTextColumn Header="Modified" Binding="{Binding FormattedModified}" Width="150"/>
+                        <DataGridTemplateColumn Header="Actions" Width="250">
+                            <DataGridTemplateColumn.CellTemplate>
+                                <DataTemplate>
+                                    <StackPanel Orientation="Horizontal">
+                                        <Button Content="Preview" Click="PreviewFile_Click" Tag="{Binding}"
+                                                Width="70" Height="25" Margin="0,0,5,0"
+                                                Visibility="{Binding IsFile, Converter={StaticResource BoolToVis}}"/>
+                                        <Button Content="Download" Click="DownloadFile_Click" Tag="{Binding}"
+                                                Width="80" Height="25" Margin="0,0,5,0"
+                                                Visibility="{Binding IsFile, Converter={StaticResource BoolToVis}}"/>
+                                        <Button Content="Delete" Click="DeleteFile_Click" Tag="{Binding}"
+                                                Style="{StaticResource DangerButton}"
+                                                Width="70" Height="25"/>
+                                    </StackPanel>
+                                </DataTemplate>
+                            </DataGridTemplateColumn.CellTemplate>
+                        </DataGridTemplateColumn>
+                    </DataGrid.Columns>
+                </DataGrid>
+
+                <TextBlock x:Name="NoFilesMessage" Text="This folder is empty"
+                           Foreground="#999" HorizontalAlignment="Center" VerticalAlignment="Center"
+                           FontSize="16" Visibility="Collapsed"/>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>

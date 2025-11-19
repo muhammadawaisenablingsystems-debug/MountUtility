@@ -1,5 +1,5 @@
-﻿using DiskMountUtility.Infrastructure.Cryptography;
-using Microsoft.JSInterop;
+﻿using Microsoft.JSInterop;
+using MountUtility.Cryptography;
 using MountUtility.Enums;
 
 namespace MountUtility.Services

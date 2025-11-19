@@ -3,7 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
-namespace DiskMountUtility.Infrastructure.Cryptography
+namespace MountUtility.Cryptography
 {
     public static class VaultKeyManager
     {
