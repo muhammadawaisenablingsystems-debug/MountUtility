@@ -71,6 +71,8 @@ namespace MountUtility.WPF.Views
 
                 VaultUnlockPanel.Visibility = Visibility.Collapsed;
                 MainContentPanel.Visibility = Visibility.Visible;
+
+                MonitorMountedDiskAsync();
             }
             catch (Exception ex)
             {
@@ -237,6 +239,35 @@ namespace MountUtility.WPF.Views
                     MessageBox.Show($"Error: {ex.Message}", "Error",
                         MessageBoxButton.OK, MessageBoxImage.Error);
                 }
+            }
+        }
+
+        private async Task MonitorMountedDiskAsync()
+        {
+            while (_isVaultUnlocked)
+            {
+                if (_mountedDisk != null)
+                {
+                    try
+                    {
+                        // Get latest mounted disk info
+                        var updatedDisk = await _diskService.GetMountedDiskInfoAsync();
+                        if (_mountedDisk.UsedSpaceInBytes != updatedDisk.UsedSpaceInBytes)
+                        {
+                            Application.Current.Dispatcher.Invoke(() =>
+                            {
+                                _mountedDisk = updatedDisk;
+                                UpdateMountedDiskUI();
+                            });
+                        }
+                    }
+                    catch
+                    {
+                        // Ignore transient errors during polling
+                    }
+                }
+
+                await Task.Delay(1000); // refresh every second
             }
         }
 
