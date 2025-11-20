@@ -62,6 +62,9 @@
                             Width="100" Height="30" Margin="0,0,5,0"/>
                     <Button Content="Refresh" Click="RefreshFiles_Click"
                             Width="80" Height="30"/>
+                    <Button Content="Up" Click="GoUp_Click"
+                            Width="80" Height="30" Margin="0,0,5,0"/>
+
                 </StackPanel>
             </Grid>
         </Border>
@@ -92,7 +95,6 @@
                                                 Width="80" Height="25" Margin="0,0,5,0"
                                                 Visibility="{Binding IsFile, Converter={StaticResource BoolToVis}}"/>
                                         <Button Content="Delete" Click="DeleteFile_Click" Tag="{Binding}"
-                                                Style="{StaticResource DangerButton}"
                                                 Width="70" Height="25"/>
                                     </StackPanel>
                                 </DataTemplate>

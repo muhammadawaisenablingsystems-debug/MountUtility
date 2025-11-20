@@ -6,6 +6,7 @@ using MountUtility.Cryptography;
 using MountUtility.FileWatcher;
 using MountUtility.Interfaces;
 using System;
+using System.Collections.Concurrent;
 
 namespace MountUtility.Services
 {
@@ -17,6 +18,9 @@ namespace MountUtility.Services
         private readonly VaultFileWatcherService _watcher;
         private readonly RealtimeVaultSyncService _realtimeSync;
         private readonly RealtimeFileExplorerService _realtimeUI;
+
+        // WPF-specific subscribers (separate from Blazor's RealtimeFileExplorerService)
+        private readonly ConcurrentDictionary<string, Func<Task>> _wpfSubscribers = new();
 
         private const long MB = 1024 * 1024;
 
@@ -40,21 +44,54 @@ namespace MountUtility.Services
             _watcher.FileDeleted += HandleFileDeleted;
             _watcher.FileRenamed += HandleFileRenamed;
 
+            // When file watcher detects changes (mounted drive → vault)
             _watcher.OnChangeDetected = async (path, changeType, oldPath) =>
             {
                 await _realtimeSync.SyncFileChangeAsync(path, changeType, oldPath);
+
+                // Notify both Blazor and WPF
                 _realtimeUI.NotifyFileChange();
+                await NotifyWpfSubscribersAsync();
             };
+
+            // Bridge: When Blazor UI updates occur, also notify WPF
+            _realtimeUI.Subscribe(async () => await NotifyWpfSubscribersAsync());
         }
 
+        // WPF subscription management
         public string SubscribeToFileChanges(Func<Task> callback)
         {
-            return _realtimeUI.Subscribe(callback);
+            var subscriptionId = Guid.NewGuid().ToString();
+            _wpfSubscribers[subscriptionId] = callback ?? throw new ArgumentNullException(nameof(callback));
+            Console.WriteLine($"📡 WPF subscribed for file updates: {subscriptionId}");
+            return subscriptionId;
         }
 
         public void UnsubscribeFromFileChanges(string subscriptionId)
         {
-            _realtimeUI.Unsubscribe(subscriptionId);
+            _wpfSubscribers.TryRemove(subscriptionId, out _);
+            Console.WriteLine($"📴 WPF unsubscribed: {subscriptionId}");
+        }
+
+        private async Task NotifyWpfSubscribersAsync()
+        {
+            if (_wpfSubscribers.IsEmpty)
+                return;
+
+            Console.WriteLine($"📢 Notifying {_wpfSubscribers.Count} WPF subscribers of file changes");
+
+            var subscribersSnapshot = _wpfSubscribers.Values.ToArray();
+            foreach (var callback in subscribersSnapshot)
+            {
+                try
+                {
+                    await callback.Invoke();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"⚠️ Error notifying WPF subscriber: {ex.Message}");
+                }
+            }
         }
 
         public async Task<DiskInfoResponse> CreateDiskAsync(CreateDiskRequest request)
@@ -228,8 +265,23 @@ namespace MountUtility.Services
             }).ToList();
         }
 
+        // ✅ FIXED: Use PushFileFromUiAsync for vault → mounted drive sync
         public async Task<bool> WriteFileAsync(Guid diskId, WriteFileRequest request)
         {
+            var success = await _realtimeSync.PushFileFromUiAsync(
+                diskId,
+                request.Path,
+                request.FileName,
+                request.Content
+            );
+
+            if (success)
+            {
+                // Notify both Blazor and WPF
+                _realtimeUI.NotifyFileChange();
+                await NotifyWpfSubscribersAsync();
+            }
+
             return await _virtualDiskService.WriteFileAsync(diskId, request.Path, request.FileName, request.Content);
         }
 
@@ -238,14 +290,34 @@ namespace MountUtility.Services
             return await _virtualDiskService.ReadFileAsync(diskId, path);
         }
 
+        // ✅ FIXED: Use DeleteFileFromUiAsync for vault → mounted drive sync
         public async Task<bool> DeleteFileAsync(Guid diskId, string path)
         {
-            return await _virtualDiskService.DeleteFileAsync(diskId, path);
+            var success = await _realtimeSync.DeleteFileFromUiAsync(diskId, path);
+
+            if (success)
+            {
+                // Notify both Blazor and WPF
+                _realtimeUI.NotifyFileChange();
+                await NotifyWpfSubscribersAsync();
+            }
+
+            //return await _virtualDiskService.DeleteFileAsync(diskId, path
+            return success;
         }
 
         public async Task<bool> CreateDirectoryAsync(Guid diskId, string path)
         {
-            return await _virtualDiskService.CreateDirectoryAsync(diskId, path);
+            var success = await _virtualDiskService.CreateDirectoryAsync(diskId, path);
+
+            if (success)
+            {
+                // Notify both Blazor and WPF
+                _realtimeUI.NotifyFileChange();
+                await NotifyWpfSubscribersAsync();
+            }
+
+            return success;
         }
 
         public async Task<bool> DeleteDiskAsync(Guid diskId)
@@ -266,7 +338,7 @@ namespace MountUtility.Services
 
         private string FormatBytes(long bytes)
         {
-            string[] sizes = { "B", "KB", "MB", "GB", "TB" };
+            string[] sizes = { "B", "KB", "MB", "GB" };
             double len = bytes;
             int order = 0;
 
@@ -421,21 +493,17 @@ namespace MountUtility.Services
 
         public async Task<Stream?> OpenFileStreamAsync(Guid diskId, string path)
         {
-            // Validate
             if (diskId == Guid.Empty || string.IsNullOrEmpty(path))
                 return null;
 
-            // Read & decrypt using existing API (this may buffer once during decryption)
             var content = await ReadFileAsync(diskId, path);
             if (content == null) return null;
 
             try
             {
                 var tempFile = Path.Combine(Path.GetTempPath(), $"vault_dl_{diskId:N}_{Guid.NewGuid():N}_{Path.GetFileName(path)}");
-                // ensure directory exists (TempPath always exists normally)
                 await File.WriteAllBytesAsync(tempFile, content).ConfigureAwait(false);
 
-                // Open with DeleteOnClose so temp file is removed when stream is disposed
                 var fs = new FileStream(
                     tempFile,
                     FileMode.Open,

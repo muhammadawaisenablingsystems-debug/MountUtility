@@ -19,6 +19,7 @@ namespace MountUtility.WPF.Views
         private ObservableCollection<FileViewModel> _files = new();
         private ObservableCollection<BreadcrumbItem> _breadcrumbs = new();
         private string? _subscriptionId;
+        private bool _isLoading = false;
 
         public FileExplorerWindow(DiskManagementService diskService)
         {
@@ -29,6 +30,23 @@ namespace MountUtility.WPF.Views
 
             Loaded += FileExplorerWindow_Loaded;
             Closing += FileExplorerWindow_Closing;
+        }
+
+        // Normalize any path to consistent format: leading '/', no trailing '/', root is "/"
+        private static string NormalizePath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path)) return "/";
+
+            // Replace backslashes and trim whitespace
+            path = path.Replace("\\", "/").Trim();
+
+            if (path == "/") return "/";
+
+            if (!path.StartsWith("/")) path = "/" + path;
+            // remove trailing slash except when it's root
+            if (path.Length > 1 && path.EndsWith("/")) path = path.TrimEnd('/');
+
+            return path;
         }
 
         private async void FileExplorerWindow_Loaded(object sender, RoutedEventArgs e)
@@ -68,12 +86,26 @@ namespace MountUtility.WPF.Views
         {
             if (_mountedDisk == null) return;
 
+            if (_isLoading) return;
+            _isLoading = true;
+
             try
             {
+                // normalize current path before requesting
+                _currentPath = NormalizePath(_currentPath);
+
                 var filesList = await _diskService.GetFilesAsync(_mountedDisk.Id, _currentPath);
 
+                if (filesList == null) filesList = new List<FileInfoResponse>();
+
+                var deduped = filesList
+                    .GroupBy(f => NormalizePath(f.Path))
+                    .Select(g => g.First())
+                    .ToList();
+
+                // clear and repopulate observable collection safely
                 _files.Clear();
-                foreach (var file in filesList)
+                foreach (var file in deduped)
                 {
                     _files.Add(new FileViewModel(file));
                 }
@@ -87,21 +119,28 @@ namespace MountUtility.WPF.Views
                 MessageBox.Show($"Failed to load files: {ex.Message}", "Error",
                     MessageBoxButton.OK, MessageBoxImage.Error);
             }
+            finally
+            {
+                _isLoading = false;
+            }
         }
 
         private void UpdateBreadcrumbs()
         {
             _breadcrumbs.Clear();
 
-            if (_currentPath == "/") return;
+            // always add root breadcrumb
+            _breadcrumbs.Add(new BreadcrumbItem { Name = _mountedDisk?.Name ?? "Root", Path = "/" });
 
-            var parts = _currentPath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+            var path = NormalizePath(_currentPath);
+            if (path == "/") return;
+
+            var parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
             var accumulated = "";
-
             foreach (var part in parts)
             {
                 accumulated += "/" + part;
-                _breadcrumbs.Add(new BreadcrumbItem { Name = part, Path = accumulated });
+                _breadcrumbs.Add(new BreadcrumbItem { Name = part, Path = NormalizePath(accumulated) });
             }
         }
 
@@ -121,8 +160,12 @@ namespace MountUtility.WPF.Views
             var selected = FilesDataGrid.SelectedItem as FileViewModel;
             if (selected != null && selected.IsDirectory)
             {
-                _currentPath = selected.Path;
-                await LoadFiles();
+                var newPath = NormalizePath(selected.Path);
+                if (newPath != _currentPath)
+                {
+                    _currentPath = newPath;
+                    await LoadFiles();
+                }
             }
         }
 
@@ -199,6 +242,12 @@ namespace MountUtility.WPF.Views
                         MessageBoxButton.OK, MessageBoxImage.Error);
                 }
             }
+        }
+
+        public void ResetExplorer()
+        {
+            _currentPath = "/";
+            _breadcrumbs.Clear();
         }
 
         private async void RefreshFiles_Click(object sender, RoutedEventArgs e)
@@ -303,7 +352,29 @@ namespace MountUtility.WPF.Views
 
         private void BackToDashboard_Click(object sender, RoutedEventArgs e)
         {
+            ResetExplorer();
             this.Hide();
+        }
+
+        private async void GoUp_Click(object sender, RoutedEventArgs e)
+        {
+            if (string.IsNullOrEmpty(_currentPath) || _currentPath == "/") return;
+
+            var normalized = NormalizePath(_currentPath);
+
+            // remove trailing segment
+            var lastSlash = normalized.LastIndexOf('/');
+            if (lastSlash <= 0)
+            {
+                _currentPath = "/";
+            }
+            else
+            {
+                var parent = normalized.Substring(0, lastSlash);
+                _currentPath = string.IsNullOrEmpty(parent) ? "/" : NormalizePath(parent);
+            }
+
+            await LoadFiles();
         }
     }
 
