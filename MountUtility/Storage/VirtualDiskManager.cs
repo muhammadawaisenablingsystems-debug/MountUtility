@@ -400,15 +400,20 @@ namespace DiskMountUtility.Infrastructure.Storage
         public Task<List<DiskFile>> GetFilesAsync(Guid diskId, string path = "/")
         {
             if (_mountedDisk == null || _mountedDisk.Id != diskId)
-            {
                 return Task.FromResult(new List<DiskFile>());
-            }
 
-            var files = _mountedDiskFiles.Values
-                .Where(f => f.Path.StartsWith(path) && f.Path != path)
+            string normalized = path.TrimEnd('/');
+
+            var result = _mountedDiskFiles.Values
+                .Where(f =>
+                {
+                    var parent = Path.GetDirectoryName(f.Path.Replace("\\", "/"))?.Replace("\\", "/") ?? "/";
+                    parent = parent.TrimEnd('/');
+                    return parent == normalized;
+                })
                 .ToList();
 
-            return Task.FromResult(files);
+            return Task.FromResult(result);
         }
 
         public async Task<bool> WriteFileAsync(Guid diskId, string path, string fileName, byte[] content)

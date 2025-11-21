@@ -33,7 +33,7 @@ namespace MountUtility.WPF.Views
         }
 
         // Normalize any path to consistent format: leading '/', no trailing '/', root is "/"
-        private static string NormalizePath(string path)
+        public static string NormalizePath(string path)
         {
             if (string.IsNullOrWhiteSpace(path)) return "/";
 
@@ -98,14 +98,14 @@ namespace MountUtility.WPF.Views
 
                 if (filesList == null) filesList = new List<FileInfoResponse>();
 
-                var deduped = filesList
-                    .GroupBy(f => NormalizePath(f.Path))
-                    .Select(g => g.First())
-                    .ToList();
+                //var deduped = filesList
+                //    .GroupBy(f => NormalizePath(f.Path))
+                //    .Select(g => g.First())
+                //    .ToList();
 
                 // clear and repopulate observable collection safely
                 _files.Clear();
-                foreach (var file in deduped)
+                foreach (var file in filesList)
                 {
                     _files.Add(new FileViewModel(file));
                 }
@@ -128,11 +128,9 @@ namespace MountUtility.WPF.Views
         private void UpdateBreadcrumbs()
         {
             _breadcrumbs.Clear();
-
-            // always add root breadcrumb
             _breadcrumbs.Add(new BreadcrumbItem { Name = _mountedDisk?.Name ?? "Root", Path = "/" });
 
-            var path = NormalizePath(_currentPath);
+            var path = _currentPath.TrimEnd('/');
             if (path == "/") return;
 
             var parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
@@ -140,7 +138,7 @@ namespace MountUtility.WPF.Views
             foreach (var part in parts)
             {
                 accumulated += "/" + part;
-                _breadcrumbs.Add(new BreadcrumbItem { Name = part, Path = NormalizePath(accumulated) });
+                _breadcrumbs.Add(new BreadcrumbItem { Name = part, Path = accumulated });
             }
         }
 
@@ -188,7 +186,7 @@ namespace MountUtility.WPF.Views
 
                     var request = new WriteFileRequest
                     {
-                        Path = _currentPath,
+                        Path = NormalizePath(_currentPath),
                         FileName = fileName,
                         Content = fileBytes
                     };
@@ -221,9 +219,8 @@ namespace MountUtility.WPF.Views
             {
                 try
                 {
-                    var folderPath = _currentPath == "/"
-                        ? $"/{dialog.FolderName}"
-                        : $"{_currentPath}/{dialog.FolderName}";
+                    // Trim trailing slash from _currentPath before appending
+                    var folderPath = FileExplorerWindow.NormalizePath($"{_currentPath.TrimEnd('/')}/{dialog.FolderName}");
 
                     var success = await _diskService.CreateDirectoryAsync(_mountedDisk.Id, folderPath);
                     if (success)
@@ -396,7 +393,7 @@ namespace MountUtility.WPF.Views
         public FileViewModel(FileInfoResponse file)
         {
             Name = file.Name;
-            Path = file.Path;
+            Path = FileExplorerWindow.NormalizePath(file.Path);
             SizeInBytes = file.SizeInBytes;
             IsDirectory = file.IsDirectory;
             ModifiedAt = file.ModifiedAt;
