@@ -1,12 +1,11 @@
-﻿using DiskMountUtility.Application.DTOs;
-using MountUtility.Services;
-using DiskMountUtility.Infrastructure.Cryptography;
-using MountUtility.Cryptography;
+﻿using MountUtility.Services;
 using MountUtility.WPF.Views.Dialogs;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
+using MountUtility.WPF.Cryptography;
+using MountUtility.WPF.DTOs;
 
 namespace MountUtility.WPF.Views
 {

@@ -1,5 +1,4 @@
-﻿using DiskMountUtility.Application.DTOs;
-using MountUtility.Services;
+﻿using MountUtility.Services;
 using Microsoft.Win32;
 using MountUtility.WPF.Views.Dialogs;
 using System.Collections.ObjectModel;
@@ -8,6 +7,7 @@ using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using MountUtility.WPF.DTOs;
 
 namespace MountUtility.WPF.Views
 {

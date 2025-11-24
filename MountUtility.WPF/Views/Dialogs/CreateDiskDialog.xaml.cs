@@ -1,5 +1,5 @@
 ﻿using System.Windows;
-using DiskMountUtility.Application.DTOs;
+using MountUtility.WPF.DTOs;
 
 namespace MountUtility.WPF.Views.Dialogs
 {

@@ -1,16 +1,15 @@
-﻿using MountUtility.FileWatcher;
-using MountUtility.Services;
-using MountUtility.Interfaces;
-using DiskMountUtility.Infrastructure.Cryptography;
-using DiskMountUtility.Infrastructure.Persistence;
+﻿using MountUtility.Services;
 using DiskMountUtility.Infrastructure.Storage;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
-using MountUtility.Cryptography;
 using MountUtility.WPF.Service;
 using MountUtility.WPF.Views;
 using System.Windows;
+using MountUtility.WPF.Persistence;
+using MountUtility.WPF.Cryptography;
+using MountUtility.WPF.FileWatcher;
+using MountUtility.WPF.Interfaces;
 
 namespace MountUtility.WPF
 {

@@ -1,6 +1,5 @@
-﻿using DiskMountUtility.Infrastructure.Cryptography;
-using MountUtility.Cryptography;
-using MountUtility.Enums;
+﻿using MountUtility.WPF.Cryptography;
+using MountUtility.WPF.Enums;
 using System.Windows;
 
 namespace MountUtility.WPF.Views
