@@ -585,8 +585,25 @@ namespace DiskMountUtility.Infrastructure.Storage
             {
                 _mountedDisk.UsedSpaceInBytes -= file.SizeInBytes;
                 _mountedDiskFiles.Remove(path);
-                _mountedDisk.LastModifiedAt = DateTime.UtcNow;
 
+                // If directory, also remove all children
+                if (file.IsDirectory)
+                {
+                    var childrenToRemove = _mountedDiskFiles.Keys
+                        .Where(p => p.StartsWith(path.TrimEnd('/') + "/", StringComparison.OrdinalIgnoreCase))
+                        .ToList();
+
+                    foreach (var childPath in childrenToRemove)
+                    {
+                        if (_mountedDiskFiles.TryGetValue(childPath, out var childFile))
+                        {
+                            _mountedDisk.UsedSpaceInBytes -= childFile.SizeInBytes;
+                            _mountedDiskFiles.Remove(childPath);
+                        }
+                    }
+                }
+
+                _mountedDisk.LastModifiedAt = DateTime.UtcNow;
                 await SaveMountedDiskAsync();
                 return true;
             }
@@ -599,6 +616,17 @@ namespace DiskMountUtility.Infrastructure.Storage
             if (_mountedDisk == null || _mountedDisk.Id != diskId)
             {
                 return false;
+            }
+
+            // Normalize path
+            path = path.Replace("\\", "/").TrimEnd('/');
+            if (!path.StartsWith("/")) path = "/" + path;
+
+            // Skip if already exists
+            if (_mountedDiskFiles.ContainsKey(path))
+            {
+                Console.WriteLine($"Directory already exists: {path}");
+                return true;
             }
 
             var diskFile = new DiskFile
@@ -622,6 +650,59 @@ namespace DiskMountUtility.Infrastructure.Storage
 
             _mountedDiskFiles[path] = diskFile;
             await SaveMountedDiskAsync();
+            Console.WriteLine($"✅ Created directory in vault: {path}");
+            return true;
+        }
+
+        public async Task<bool> RenameFileAsync(Guid diskId, string oldPath, string newPath)
+        {
+            if (_mountedDisk == null || _mountedDisk.Id != diskId)
+            {
+                return false;
+            }
+
+            oldPath = oldPath.Replace("\\", "/");
+            newPath = newPath.Replace("\\", "/");
+
+            if (!_mountedDiskFiles.TryGetValue(oldPath, out var file))
+            {
+                Console.WriteLine($"⚠️ File not found for rename: {oldPath}");
+                return false;
+            }
+
+            _mountedDiskFiles.Remove(oldPath);
+
+            file.Path = newPath;
+            file.Name = Path.GetFileName(newPath);
+            file.ModifiedAt = DateTime.UtcNow;
+
+            _mountedDiskFiles[newPath] = file;
+
+            // If directory, update all children paths
+            if (file.IsDirectory)
+            {
+                var oldPrefix = oldPath.TrimEnd('/') + "/";
+                var newPrefix = newPath.TrimEnd('/') + "/";
+
+                var childrenToUpdate = _mountedDiskFiles
+                    .Where(kv => kv.Key.StartsWith(oldPrefix, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+
+                foreach (var child in childrenToUpdate)
+                {
+                    var childFile = child.Value;
+                    var updatedPath = newPrefix + child.Key.Substring(oldPrefix.Length);
+
+                    _mountedDiskFiles.Remove(child.Key);
+                    childFile.Path = updatedPath;
+                    childFile.ModifiedAt = DateTime.UtcNow;
+                    _mountedDiskFiles[updatedPath] = childFile;
+                }
+            }
+
+            _mountedDisk.LastModifiedAt = DateTime.UtcNow;
+            await SaveMountedDiskAsync();
+            Console.WriteLine($"✅ Renamed in vault: {oldPath} → {newPath}");
             return true;
         }
 
@@ -945,7 +1026,7 @@ namespace DiskMountUtility.Infrastructure.Storage
                     return false;
                 }
 
-                var driveRoot = $"{driveLetter}:\\"; 
+                var driveRoot = $"{driveLetter}:\\";
                 var timeout = DateTime.UtcNow.AddSeconds(15);
 
                 while (!Directory.Exists(driveRoot) && DateTime.UtcNow < timeout)
@@ -969,7 +1050,7 @@ namespace DiskMountUtility.Infrastructure.Storage
                 MountedVaultPath = driveRoot;
 
                 Console.WriteLine($"✅ Vault mounted as physical drive {driveLetter}:\\")
-;                return true;
+; return true;
             }
             catch (Exception ex)
             {

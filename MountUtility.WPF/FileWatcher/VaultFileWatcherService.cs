@@ -19,8 +19,8 @@ namespace MountUtility.WPF.FileWatcher
         private readonly SemaphoreSlim _processingLock = new(1, 1);
         private bool _disposed = false;
 
-        // ✅ FIX: Increased debounce to handle Windows write delays
-        private const int DebounceDelayMs = 3000;
+        // Reduced debounce to catch quick renames while still avoiding duplicate events
+        private const int DebounceDelayMs = 800;
 
         public event Action<string>? FileAdded;
         public event Action<string>? FileUpdated;
@@ -209,7 +209,21 @@ namespace MountUtility.WPF.FileWatcher
         {
             if ((ShouldSkipFile(e.FullPath) && ShouldSkipFile(e.OldFullPath)) || AreEventsSuppressed()) return;
 
-            EnqueueOrMerge(e.FullPath, FileChangeType.Renamed, e.OldFullPath);
+            // Handle rename immediately without debounce to catch quick renames
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    if (OnChangeDetected != null)
+                    {
+                        await OnChangeDetected(e.FullPath, FileChangeType.Renamed, e.OldFullPath);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log($"❌ Rename sync error: {ex.Message}");
+                }
+            });
         }
 
         private void EnqueueOrMerge(string fullPath, FileChangeType changeType, string? oldPath = null)

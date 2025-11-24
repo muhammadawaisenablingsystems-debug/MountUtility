@@ -17,6 +17,7 @@ public interface IVirtualDiskService
     Task<byte[]?> ReadFileAsync(Guid diskId, string path);
     Task<bool> DeleteFileAsync(Guid diskId, string path);
     Task<bool> CreateDirectoryAsync(Guid diskId, string path);
+    Task<bool> RenameFileAsync(Guid diskId, string oldPath, string newPath);
     Task<string?> GetMountedPathAsync(Guid diskId);
     Task InitializeAsync();
 }

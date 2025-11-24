@@ -193,40 +193,62 @@ namespace MountUtility.Services
                             }
 
                             var oldRel = GetRelativePath(oldPath, _activeMountPath!);
-                            var deleteOk = await _virtualDiskService.DeleteFileAsync(_activeDiskId.Value, oldRel);
-                            if (deleteOk)
-                                Console.WriteLine($"✅ Removed old path from vault: {oldRel}");
+                            var newRel = GetRelativePath(fullPath, _activeMountPath!);
 
-                            // If new is directory
-                            if (Directory.Exists(fullPath))
+                            // Use the new RenameFileAsync method that handles directory children
+                            var renamed = await _virtualDiskService.RenameFileAsync(_activeDiskId.Value, oldRel, newRel);
+                            if (renamed)
                             {
-                                var newDirRel = GetRelativePath(fullPath, _activeMountPath!);
+                                Console.WriteLine($"✅ Renamed in vault: {oldRel} → {newRel}");
 
-                                // create new folder entry in vault
-                                await _virtualDiskService.CreateDirectoryAsync(_activeDiskId.Value, newDirRel);
+                                // If it's a directory that exists physically, scan and sync all children
+                                if (Directory.Exists(fullPath))
+                                {
+                                    Console.WriteLine($"✅ Directory renamed: {newRel}");
 
-                                return;
+                                    // Scan directory and sync any missing children (handles moved folders)
+                                    await SyncDirectoryContentsAsync(fullPath, newRel);
+                                }
+                                // If it's a file, re-read and update content (in case it changed during rename)
+                                else if (File.Exists(fullPath))
+                                {
+                                    try
+                                    {
+                                        var content = ReadFileWithRetry(fullPath);
+                                        var (dirPath, fileName) = SplitRelativeDirAndName(fullPath);
+                                        await _virtualDisk_service_WriteFileAsyncWithChecks(_activeDiskId.Value, dirPath, fileName, content, fullPath);
+                                        Console.WriteLine($"✅ Updated renamed file content: {fileName}");
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        Console.WriteLine($"⚠️ Could not update renamed file {fullPath}: {ex.Message}");
+                                    }
+                                }
                             }
-
-                            if (File.Exists(fullPath))
+                            else
                             {
-                                byte[] content;
-                                try
-                                {
-                                    content = ReadFileWithRetry(fullPath);
-                                }
-                                catch (Exception ex)
-                                {
-                                    Console.WriteLine($"⚠️ Could not read renamed file {fullPath}: {ex.Message}");
-                                    return;
-                                }
+                                Console.WriteLine($"⚠️ Rename failed in vault, treating as delete+create");
+                                // Fallback: delete old and create new
+                                await _virtualDiskService.DeleteFileAsync(_activeDiskId.Value, oldRel);
 
-                                var (dirPath, fileName) = SplitRelativeDirAndName(fullPath);
-                                var wrote = await _virtualDisk_service_WriteFileAsyncWithChecks(_activeDiskId.Value, dirPath, fileName, content, fullPath);
-                                if (wrote)
-                                    Console.WriteLine($"✅ Persisted renamed file to vault: {fileName}");
-                                else
-                                    Console.WriteLine($"❌ Failed to persist renamed file: {fileName}");
+                                if (Directory.Exists(fullPath))
+                                {
+                                    await _virtualDiskService.CreateDirectoryAsync(_activeDiskId.Value, newRel);
+                                    await SyncDirectoryContentsAsync(fullPath, newRel);
+                                }
+                                else if (File.Exists(fullPath))
+                                {
+                                    try
+                                    {
+                                        var content = ReadFileWithRetry(fullPath);
+                                        var (dirPath, fileName) = SplitRelativeDirAndName(fullPath);
+                                        await _virtualDisk_service_WriteFileAsyncWithChecks(_activeDiskId.Value, dirPath, fileName, content, fullPath);
+                                    }
+                                    catch (Exception ex)
+                                    {
+                                        Console.WriteLine($"⚠️ Could not create renamed file {fullPath}: {ex.Message}");
+                                    }
+                                }
                             }
 
                             break;
@@ -396,6 +418,51 @@ namespace MountUtility.Services
         {
             if (string.IsNullOrEmpty(path)) return "/";
             return path.Replace("\\", "/").Replace("//", "/");
+        }
+
+        private async Task SyncDirectoryContentsAsync(string physicalDirPath, string vaultDirPath)
+        {
+            if (!Directory.Exists(physicalDirPath)) return;
+
+            try
+            {
+                // Scan subdirectories first
+                foreach (var subDir in Directory.GetDirectories(physicalDirPath))
+                {
+                    var dirInfo = new DirectoryInfo(subDir);
+                    if (ShouldSkipSystemFile(dirInfo.Name)) continue;
+
+                    var relPath = GetRelativePath(subDir, _activeMountPath!);
+                    await _virtualDiskService.CreateDirectoryAsync(_activeDiskId!.Value, relPath);
+
+                    // Recursively sync subdirectory contents
+                    await SyncDirectoryContentsAsync(subDir, relPath);
+                }
+
+                // Then sync files in this directory
+                foreach (var file in Directory.GetFiles(physicalDirPath))
+                {
+                    var fileInfo = new FileInfo(file);
+                    if (ShouldSkipSystemFile(fileInfo.Name)) continue;
+
+                    try
+                    {
+                        var content = ReadFileWithRetry(file);
+                        var (dirPath, fileName) = SplitRelativeDirAndName(file);
+                        await _virtualDiskService.WriteFileAsync(_activeDiskId!.Value, dirPath, fileName, content);
+                        MarkRecentWrite(file);
+                        Console.WriteLine($"✅ Synced moved file: {fileName}");
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"⚠️ Failed to sync moved file {fileInfo.Name}: {ex.Message}");
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ Error syncing directory contents: {ex.Message}");
+            }
         }
 
         private List<DiskFile> ScanPhysicalDrive(string mountedPath)
