@@ -91,15 +91,23 @@ namespace MountUtility.Services
                             if (Directory.Exists(fullPath))
                             {
                                 var dirRel = GetRelativePath(fullPath, _activeMountPath!);
-                                var created = await _virtualDiskService.CreateDirectoryAsync(_activeDiskId.Value, dirRel);
-                                Console.WriteLine(created ? $"✅ Created directory in vault: {dirRel}" : $"⚠️ Failed to create directory in vault: {dirRel}");
+
+                                // always create folder in vault
+                                await _virtualDiskService.CreateDirectoryAsync(_activeDiskId.Value, dirRel);
+
+                                // ensure local physical folder exists
+                                Directory.CreateDirectory(fullPath);
+
                                 return;
                             }
 
                             // file created
-                            if (!File.Exists(fullPath))
+                            if (File.Exists(fullPath))
                             {
-                                Console.WriteLine($"⚠️ File not found for Created: {fullPath}");
+                                var content = ReadFileWithRetry(fullPath);
+                                var (dirPath, fileName) = SplitRelativeDirAndName(fullPath);
+
+                                await _virtualDiskService.WriteFileAsync(_activeDiskId.Value, dirPath, fileName, content);
                                 return;
                             }
 
@@ -192,8 +200,10 @@ namespace MountUtility.Services
                             if (Directory.Exists(fullPath))
                             {
                                 var newDirRel = GetRelativePath(fullPath, _activeMountPath!);
-                                var created = await _virtualDiskService.CreateDirectoryAsync(_activeDiskId.Value, newDirRel);
-                                Console.WriteLine(created ? $"✅ Created directory in vault: {newDirRel}" : $"⚠️ Failed to create directory in vault: {newDirRel}");
+
+                                // create new folder entry in vault
+                                await _virtualDiskService.CreateDirectoryAsync(_activeDiskId.Value, newDirRel);
+
                                 return;
                             }
 
