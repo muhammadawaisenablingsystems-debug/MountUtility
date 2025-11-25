@@ -650,7 +650,33 @@ namespace DiskMountUtility.Infrastructure.Storage
 
             _mountedDiskFiles[path] = diskFile;
             await SaveMountedDiskAsync();
-            Console.WriteLine($"✅ Created directory in vault: {path}");
+
+            // Also create the directory in the mounted physical drive (if mounted)
+            if (!string.IsNullOrEmpty(MountedVaultPath))
+            {
+                try
+                {
+                    var physicalPath = MountedVaultPath.TrimEnd('\\') + path.Replace("/", "\\");
+                    if (!Directory.Exists(physicalPath))
+                    {
+                        Directory.CreateDirectory(physicalPath);
+                        Console.WriteLine($"✅ Created directory in vault and physical drive: {path}");
+                    }
+                    else
+                    {
+                        Console.WriteLine($"✅ Created directory in vault (already exists physically): {path}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"⚠️ Failed to create physical directory: {ex.Message}");
+                }
+            }
+            else
+            {
+                Console.WriteLine($"✅ Created directory in vault: {path}");
+            }
+
             return true;
         }
 
