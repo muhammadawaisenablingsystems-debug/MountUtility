@@ -1,4 +1,4 @@
-using MountUtility.WPF.Entities;
+﻿using MountUtility.WPF.Entities;
 using MountUtility.WPF.FileWatcher;
 using MountUtility.WPF.Interfaces;
 using System.Collections.Concurrent;
@@ -65,11 +65,12 @@ namespace MountUtility.Services
                 _periodicScanTimer.Dispose();
             }
 
+            // Run reconciliation every 3 seconds to catch folder moves
             _periodicScanTimer = new Timer(
                 _ => _ = ReconcileWrapper(),
                 null,
-                TimeSpan.FromSeconds(1.5),
-                TimeSpan.FromSeconds(1.5)
+                TimeSpan.FromSeconds(3),
+                TimeSpan.FromSeconds(3)
             );
 
             async Task ReconcileWrapper()
@@ -253,8 +254,8 @@ namespace MountUtility.Services
                                 return;
                             }
 
-                            bool isDirectory = Directory.Exists(fullPath);
-                            if (isDirectory)
+                            // If renaming a directory, mark it as moving to suppress child delete events
+                            if (Directory.Exists(fullPath))
                             {
                                 MarkDirectoryAsMoving(oldPath);
                             }
@@ -262,19 +263,39 @@ namespace MountUtility.Services
                             var oldRel = GetRelativePath(oldPath, _activeMountPath!);
                             var newRel = GetRelativePath(fullPath, _activeMountPath!);
 
+                            // Use the new RenameFileAsync method that handles directory children
                             var renamed = await _virtualDiskService.RenameFileAsync(_activeDiskId.Value, oldRel, newRel);
-
                             if (renamed)
                             {
                                 Console.WriteLine($"✅ Renamed in vault: {oldRel} → {newRel}");
 
-                                if (isDirectory)
+                                // If it's a directory that exists physically, scan and sync all children
+                                if (Directory.Exists(fullPath))
                                 {
+                                    Console.WriteLine($"✅ Directory renamed: {newRel}");
+
+                                    // Scan directory and sync any missing children (handles moved folders)
                                     await SyncDirectoryContentsAsync(fullPath, newRel);
 
-                                    await Task.Delay(500).ConfigureAwait(false);
+                                    // After move, reconcile to clean up any orphaned entries in vault
+                                    await Task.Delay(800);
                                     await ReconcileVaultWithPhysicalDriveAsync();
+
+                                    // Also ensure the new directory path exists physically (in case it wasn't created by sync)
+                                    if (!Directory.Exists(fullPath))
+                                    {
+                                        try
+                                        {
+                                            Directory.CreateDirectory(fullPath);
+                                            Console.WriteLine($"✅ Ensured physical directory exists: {newRel}");
+                                        }
+                                        catch (Exception ex)
+                                        {
+                                            Console.WriteLine($"⚠️ Failed to ensure directory exists: {ex.Message}");
+                                        }
+                                    }
                                 }
+                                // If it's a file, re-read and update content (in case it changed during rename)
                                 else if (File.Exists(fullPath))
                                 {
                                     try
@@ -282,22 +303,25 @@ namespace MountUtility.Services
                                         var content = ReadFileWithRetry(fullPath);
                                         var (dirPath, fileName) = SplitRelativeDirAndName(fullPath);
                                         await _virtualDisk_service_WriteFileAsyncWithChecks(_activeDiskId.Value, dirPath, fileName, content, fullPath);
+                                        Console.WriteLine($"✅ Updated renamed file content: {fileName}");
                                     }
                                     catch (Exception ex)
                                     {
-                                        Console.WriteLine($"⚠️ Could not update renamed file: {ex.Message}");
+                                        Console.WriteLine($"⚠️ Could not update renamed file {fullPath}: {ex.Message}");
                                     }
                                 }
                             }
                             else
                             {
-                                Console.WriteLine($"⚠️ Rename failed, using delete+create");
+                                Console.WriteLine($"⚠️ Rename failed in vault, treating as delete+create");
+                                // Fallback: delete old and create new
                                 await _virtualDiskService.DeleteFileAsync(_activeDiskId.Value, oldRel);
 
-                                if (isDirectory)
+                                if (Directory.Exists(fullPath))
                                 {
                                     await _virtualDiskService.CreateDirectoryAsync(_activeDiskId.Value, newRel);
                                     await SyncDirectoryContentsAsync(fullPath, newRel);
+                                    await Task.Delay(500);
                                     await ReconcileVaultWithPhysicalDriveAsync();
                                 }
                                 else if (File.Exists(fullPath))
@@ -310,7 +334,7 @@ namespace MountUtility.Services
                                     }
                                     catch (Exception ex)
                                     {
-                                        Console.WriteLine($"⚠️ Could not create file after failed rename: {ex.Message}");
+                                        Console.WriteLine($"⚠️ Could not create renamed file {fullPath}: {ex.Message}");
                                     }
                                 }
                             }
