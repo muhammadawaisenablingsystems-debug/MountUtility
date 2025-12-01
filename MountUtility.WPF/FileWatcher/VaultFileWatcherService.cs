@@ -1,4 +1,4 @@
-﻿using MountUtility.Services;
+using MountUtility.Services;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -207,37 +207,10 @@ namespace MountUtility.WPF.FileWatcher
 
         private void OnFileRenamed(object sender, RenamedEventArgs e)
         {
-            Console.WriteLine($"🔔🔔🔔 RENAME EVENT: {e.OldFullPath} → {e.FullPath}");
-            Console.WriteLine($"    IsDirectory: {Directory.Exists(e.FullPath)}");
-
             if ((ShouldSkipFile(e.FullPath) && ShouldSkipFile(e.OldFullPath)) || AreEventsSuppressed())
-            {
-                Console.WriteLine($"    ❌ SKIPPED!");
                 return;
-            }
 
-            Console.WriteLine($"    ✅ Calling OnChangeDetected...");
-
-            // Handle rename immediately without debounce to catch quick renames
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    Console.WriteLine($"    🔄 Inside Task.Run, calling OnChangeDetected");
-                    if (OnChangeDetected != null)
-                    {
-                        await OnChangeDetected(e.FullPath, FileChangeType.Renamed, e.OldFullPath);
-                    }
-                    else
-                    {
-                        Console.WriteLine($"    ❌ OnChangeDetected is NULL!");
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine($"❌ Rename sync error: {ex.Message}");
-                }
-            });
+            EnqueueOrMerge(e.FullPath, FileChangeType.Renamed, e.OldPath);
         }
 
         private void EnqueueOrMerge(string fullPath, FileChangeType changeType, string? oldPath = null)
@@ -327,7 +300,6 @@ namespace MountUtility.WPF.FileWatcher
                 foreach (var kv in ready)
                     _pendingChanges.TryRemove(kv.Key, out _);
 
-                // ✅ FIX: Process with suppression to avoid feedback loops
                 Interlocked.Exchange(ref _suppressEventsFlag, 1);
                 try
                 {
@@ -347,11 +319,11 @@ namespace MountUtility.WPF.FileWatcher
                             Log($"❌ Sync error for {Path.GetFileName(path)}: {ex.Message}");
                         }
                     }
+
+                    await Task.Delay(1500).ConfigureAwait(false);
                 }
                 finally
                 {
-                    // ✅ FIX: Wait before re-enabling events to let writes settle
-                    await Task.Delay(1000);
                     Interlocked.Exchange(ref _suppressEventsFlag, 0);
                 }
             }
