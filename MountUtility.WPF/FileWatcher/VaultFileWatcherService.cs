@@ -207,21 +207,35 @@ namespace MountUtility.WPF.FileWatcher
 
         private void OnFileRenamed(object sender, RenamedEventArgs e)
         {
-            if ((ShouldSkipFile(e.FullPath) && ShouldSkipFile(e.OldFullPath)) || AreEventsSuppressed()) return;
+            Console.WriteLine($"🔔🔔🔔 RENAME EVENT: {e.OldFullPath} → {e.FullPath}");
+            Console.WriteLine($"    IsDirectory: {Directory.Exists(e.FullPath)}");
+
+            if ((ShouldSkipFile(e.FullPath) && ShouldSkipFile(e.OldFullPath)) || AreEventsSuppressed())
+            {
+                Console.WriteLine($"    ❌ SKIPPED!");
+                return;
+            }
+
+            Console.WriteLine($"    ✅ Calling OnChangeDetected...");
 
             // Handle rename immediately without debounce to catch quick renames
             _ = Task.Run(async () =>
             {
                 try
                 {
+                    Console.WriteLine($"    🔄 Inside Task.Run, calling OnChangeDetected");
                     if (OnChangeDetected != null)
                     {
                         await OnChangeDetected(e.FullPath, FileChangeType.Renamed, e.OldFullPath);
                     }
+                    else
+                    {
+                        Console.WriteLine($"    ❌ OnChangeDetected is NULL!");
+                    }
                 }
                 catch (Exception ex)
                 {
-                    Log($"❌ Rename sync error: {ex.Message}");
+                    Console.WriteLine($"❌ Rename sync error: {ex.Message}");
                 }
             });
         }
@@ -383,6 +397,11 @@ namespace MountUtility.WPF.FileWatcher
 
             try
             {
+                if (Directory.Exists(path))
+                {
+                    return false; // Don't skip directories
+                }
+
                 if (File.Exists(path))
                 {
                     var attrs = File.GetAttributes(path);

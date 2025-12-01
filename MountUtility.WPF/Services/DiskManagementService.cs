@@ -1,4 +1,5 @@
-﻿using Microsoft.EntityFrameworkCore;
+﻿
+using Microsoft.EntityFrameworkCore;
 using MountUtility.WPF.Cryptography;
 using MountUtility.WPF.DTOs;
 using MountUtility.WPF.Entities;
@@ -80,6 +81,16 @@ namespace MountUtility.Services
                 return;
 
             Console.WriteLine($"📢 Notifying {_wpfSubscribers.Count} WPF subscribers of file changes");
+
+            // Before notifying UI, do reconciliation to catch folder moves that may not have fired events
+            try
+            {
+                await _realtimeSync.ReconcileVaultWithPhysicalDriveAsync();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ Reconciliation during notification error: {ex.Message}");
+            }
 
             var subscribersSnapshot = _wpfSubscribers.Values.ToArray();
             foreach (var callback in subscribersSnapshot)
