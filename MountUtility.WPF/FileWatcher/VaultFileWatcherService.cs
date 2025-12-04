@@ -1,4 +1,4 @@
-﻿using MountUtility.Services;
+using MountUtility.Services;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
@@ -207,35 +207,36 @@ namespace MountUtility.WPF.FileWatcher
 
         private void OnFileRenamed(object sender, RenamedEventArgs e)
         {
-            Console.WriteLine($"🔔🔔🔔 RENAME EVENT: {e.OldFullPath} → {e.FullPath}");
-            Console.WriteLine($"    IsDirectory: {Directory.Exists(e.FullPath)}");
-
             if ((ShouldSkipFile(e.FullPath) && ShouldSkipFile(e.OldFullPath)) || AreEventsSuppressed())
-            {
-                Console.WriteLine($"    ❌ SKIPPED!");
                 return;
+
+            bool isDirectory = Directory.Exists(e.FullPath);
+
+            if (isDirectory)
+            {
+                Interlocked.Exchange(ref _suppressEventsFlag, 1);
             }
 
-            Console.WriteLine($"    ✅ Calling OnChangeDetected...");
-
-            // Handle rename immediately without debounce to catch quick renames
             _ = Task.Run(async () =>
             {
                 try
                 {
-                    Console.WriteLine($"    🔄 Inside Task.Run, calling OnChangeDetected");
                     if (OnChangeDetected != null)
                     {
-                        await OnChangeDetected(e.FullPath, FileChangeType.Renamed, e.OldFullPath);
-                    }
-                    else
-                    {
-                        Console.WriteLine($"    ❌ OnChangeDetected is NULL!");
+                        await OnChangeDetected(e.FullPath, FileChangeType.Renamed, e.OldFullPath).ConfigureAwait(false);
                     }
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"❌ Rename sync error: {ex.Message}");
+                    Log($"❌ Rename sync error: {ex.Message}");
+                }
+                finally
+                {
+                    if (isDirectory)
+                    {
+                        await Task.Delay(2000).ConfigureAwait(false);
+                        Interlocked.Exchange(ref _suppressEventsFlag, 0);
+                    }
                 }
             });
         }
