@@ -288,13 +288,17 @@ namespace MountUtility.WPF.FileWatcher
                     if (AreEventsSuppressed()) break;
                     Log($"🔍 Polling detected rename: {Path.GetFileName(oldPath)} → {Path.GetFileName(newPath)}");
 
+                    var oldPathCopy = oldPath;
+                    var newPathCopy = newPath;
+
                     _ = Task.Run(async () =>
                     {
                         try
                         {
                             if (OnChangeDetected != null)
                             {
-                                await OnChangeDetected(newPath, FileChangeType.Renamed, oldPath);
+                                await OnChangeDetected(newPathCopy, FileChangeType.Renamed, oldPathCopy);
+                                FileRenamed?.Invoke(oldPathCopy, newPathCopy);
                             }
                         }
                         catch (Exception ex)
@@ -356,6 +360,42 @@ namespace MountUtility.WPF.FileWatcher
             catch (Exception ex)
             {
                 Log($"⚠️ Error scanning {path}: {ex.Message}");
+            }
+        }
+
+        private void RaiseEventForChangeType(string path, FileChangeType changeType, string? oldPath)
+        {
+            try
+            {
+                switch (changeType)
+                {
+                    case FileChangeType.Created:
+                        FileAdded?.Invoke(path);
+                        Log($"📢 Event raised: FileAdded for {Path.GetFileName(path)}");
+                        break;
+
+                    case FileChangeType.Modified:
+                        FileUpdated?.Invoke(path);
+                        Log($"📢 Event raised: FileUpdated for {Path.GetFileName(path)}");
+                        break;
+
+                    case FileChangeType.Deleted:
+                        FileDeleted?.Invoke(path);
+                        Log($"📢 Event raised: FileDeleted for {Path.GetFileName(path)}");
+                        break;
+
+                    case FileChangeType.Renamed:
+                        if (!string.IsNullOrEmpty(oldPath))
+                        {
+                            FileRenamed?.Invoke(oldPath, path);
+                            Log($"📢 Event raised: FileRenamed from {Path.GetFileName(oldPath)} to {Path.GetFileName(path)}");
+                        }
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"⚠️ Error raising event for {changeType}: {ex.Message}");
             }
         }
 
@@ -574,6 +614,7 @@ namespace MountUtility.WPF.FileWatcher
                             if (OnChangeDetected != null)
                             {
                                 await SafeInvokeOnChangeDetectedAsync(path, pending.ChangeType, pending.OldPath).ConfigureAwait(false);
+                                RaiseEventForChangeType(path, pending.ChangeType, pending.OldPath);
                             }
                         }
                         catch (Exception ex)
