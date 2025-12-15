@@ -14,13 +14,16 @@ namespace MountUtility.WPF.FileWatcher
         private FileSystemWatcher? _watcher;
         private string? _vaultPath;
         private Timer? _debounceTimer;
+        private Timer? _pollingTimer;
 
         private readonly ConcurrentDictionary<string, PendingChange> _pendingChanges = new();
+        private readonly ConcurrentDictionary<string, FileSystemSnapshot> _lastSnapshot = new();
         private readonly SemaphoreSlim _processingLock = new(1, 1);
+        private readonly SemaphoreSlim _pollingLock = new(1, 1);
         private bool _disposed = false;
 
-        // Reduced debounce to catch quick renames while still avoiding duplicate events
         private const int DebounceDelayMs = 800;
+        private const int PollingIntervalMs = 2000;
 
         public event Action<string>? FileAdded;
         public event Action<string>? FileUpdated;
@@ -31,7 +34,6 @@ namespace MountUtility.WPF.FileWatcher
 
         public bool EnableDebugLogging { get; set; } = false;
 
-        // ✅ FIX: Use int for atomic operations (0=false, 1=true)
         private int _suppressEventsFlag = 0;
 
         private sealed class PendingChange
@@ -39,6 +41,14 @@ namespace MountUtility.WPF.FileWatcher
             public FileChangeType ChangeType { get; set; }
             public string? OldPath { get; set; }
             public DateTime LastSeenUtc { get; set; }
+        }
+
+        private sealed class FileSystemSnapshot
+        {
+            public string Path { get; set; } = string.Empty;
+            public bool IsDirectory { get; set; }
+            public long Size { get; set; }
+            public DateTime LastWriteTimeUtc { get; set; }
         }
 
         public void Initialize(string vaultPath)
@@ -49,10 +59,12 @@ namespace MountUtility.WPF.FileWatcher
             try
             {
                 _debounceTimer?.Dispose();
+                _pollingTimer?.Dispose();
             }
             catch { }
 
             _debounceTimer = new Timer(_ => _ = ScheduleProcessPendingChangesAsync(), null, Timeout.Infinite, Timeout.Infinite);
+            _pollingTimer = new Timer(_ => _ = PollFileSystemAsync(), null, Timeout.Infinite, Timeout.Infinite);
         }
 
         public void StartWatcher()
@@ -79,6 +91,7 @@ namespace MountUtility.WPF.FileWatcher
                              | NotifyFilters.Size
                              | NotifyFilters.LastWrite
                              | NotifyFilters.DirectoryName
+                             | NotifyFilters.Attributes
             };
 
             _watcher.Created += OnFileCreated;
@@ -87,7 +100,15 @@ namespace MountUtility.WPF.FileWatcher
             _watcher.Renamed += OnFileRenamed;
             _watcher.Error += OnWatcherError;
 
-            Log($"✅ File Watcher Started for: {_vaultPath}");
+            TakeSnapshot();
+
+            try
+            {
+                _pollingTimer?.Change(PollingIntervalMs, PollingIntervalMs);
+            }
+            catch (ObjectDisposedException) { }
+
+            Log($"✅ File Watcher Started (with polling backup) for: {_vaultPath}");
         }
 
         public void StopWatcher()
@@ -102,17 +123,21 @@ namespace MountUtility.WPF.FileWatcher
             try
             {
                 _debounceTimer?.Change(Timeout.Infinite, Timeout.Infinite);
+                _pollingTimer?.Change(Timeout.Infinite, Timeout.Infinite);
             }
             catch { }
 
             try
             {
                 _debounceTimer?.Dispose();
+                _pollingTimer?.Dispose();
             }
             catch { }
 
             _debounceTimer = null;
+            _pollingTimer = null;
             _pendingChanges.Clear();
+            _lastSnapshot.Clear();
 
             Log("⛔ File Watcher Stopped.");
         }
@@ -150,38 +175,265 @@ namespace MountUtility.WPF.FileWatcher
             }
         }
 
-        private string GetRelativePath(string fullPath, string baseMountPath)
+        private void TakeSnapshot()
         {
-            if (string.IsNullOrEmpty(fullPath) || string.IsNullOrEmpty(baseMountPath))
-                return "/";
+            if (string.IsNullOrEmpty(_vaultPath) || !Directory.Exists(_vaultPath))
+                return;
 
-            var basePath = baseMountPath.TrimEnd('\\', '/');
-            if (!fullPath.StartsWith(basePath, StringComparison.OrdinalIgnoreCase))
+            _lastSnapshot.Clear();
+
+            try
             {
-                // fallback: return a normalized path
-                var normalized = fullPath.Replace("\\", "/").TrimStart('/');
-                return "/" + normalized;
+                ScanDirectoryForSnapshot(_vaultPath);
+                Log($"📸 Snapshot taken: {_lastSnapshot.Count} items");
             }
-
-            if (fullPath.Length <= basePath.Length)
-                return "/";
-
-            var p = fullPath.Substring(basePath.Length);
-            var relativePath = p.TrimStart('\\', '/').Replace("\\", "/");
-            return "/" + relativePath;
+            catch (Exception ex)
+            {
+                Log($"⚠️ Snapshot failed: {ex.Message}");
+            }
         }
 
-        private string GetRelativePath(string fullPath, int basePathLength)
+        private void ScanDirectoryForSnapshot(string path)
         {
-            if (string.IsNullOrEmpty(fullPath) || basePathLength < 0)
-                return "/";
+            try
+            {
+                foreach (var dir in Directory.GetDirectories(path))
+                {
+                    if (ShouldSkipFile(dir)) continue;
 
-            if (fullPath.Length <= basePathLength)
-                return "/";
+                    var dirInfo = new DirectoryInfo(dir);
+                    _lastSnapshot[dir] = new FileSystemSnapshot
+                    {
+                        Path = dir,
+                        IsDirectory = true,
+                        Size = 0,
+                        LastWriteTimeUtc = dirInfo.LastWriteTimeUtc
+                    };
 
-            var p = fullPath.Substring(basePathLength);
-            var relativePath = p.TrimStart('\\', '/').Replace("\\", "/");
-            return "/" + relativePath;
+                    ScanDirectoryForSnapshot(dir);
+                }
+
+                foreach (var file in Directory.GetFiles(path))
+                {
+                    if (ShouldSkipFile(file)) continue;
+
+                    var fileInfo = new FileInfo(file);
+                    _lastSnapshot[file] = new FileSystemSnapshot
+                    {
+                        Path = file,
+                        IsDirectory = false,
+                        Size = fileInfo.Length,
+                        LastWriteTimeUtc = fileInfo.LastWriteTimeUtc
+                    };
+                }
+            }
+            catch (UnauthorizedAccessException) { }
+            catch (Exception ex)
+            {
+                Log($"⚠️ Error scanning {path}: {ex.Message}");
+            }
+        }
+
+        private async Task PollFileSystemAsync()
+        {
+            if (AreEventsSuppressed() || string.IsNullOrEmpty(_vaultPath))
+                return;
+
+            if (!await _pollingLock.WaitAsync(0).ConfigureAwait(false))
+                return;
+
+            try
+            {
+                var currentSnapshot = new Dictionary<string, FileSystemSnapshot>();
+                ScanDirectoryForSnapshotInto(_vaultPath, currentSnapshot);
+
+                var oldPaths = _lastSnapshot.Keys.ToHashSet();
+                var newPaths = currentSnapshot.Keys.ToHashSet();
+
+                var added = newPaths.Except(oldPaths).ToList();
+                var removed = oldPaths.Except(newPaths).ToList();
+                var common = newPaths.Intersect(oldPaths).ToList();
+
+                foreach (var path in removed)
+                {
+                    if (AreEventsSuppressed()) break;
+                    Log($"🔍 Polling detected deletion: {Path.GetFileName(path)}");
+                    EnqueueOrMerge(path, FileChangeType.Deleted);
+                }
+
+                foreach (var path in added)
+                {
+                    if (AreEventsSuppressed()) break;
+                    Log($"🔍 Polling detected creation: {Path.GetFileName(path)}");
+                    EnqueueOrMerge(path, FileChangeType.Created);
+                }
+
+                foreach (var path in common)
+                {
+                    if (AreEventsSuppressed()) break;
+
+                    var oldSnap = _lastSnapshot[path];
+                    var newSnap = currentSnapshot[path];
+
+                    if (!oldSnap.IsDirectory && (oldSnap.Size != newSnap.Size || oldSnap.LastWriteTimeUtc != newSnap.LastWriteTimeUtc))
+                    {
+                        Log($"🔍 Polling detected modification: {Path.GetFileName(path)}");
+                        EnqueueOrMerge(path, FileChangeType.Modified);
+                    }
+                }
+
+                var renames = DetectRenames(removed, added, _lastSnapshot, currentSnapshot);
+                foreach (var (oldPath, newPath) in renames)
+                {
+                    if (AreEventsSuppressed()) break;
+                    Log($"🔍 Polling detected rename: {Path.GetFileName(oldPath)} → {Path.GetFileName(newPath)}");
+
+                    _ = Task.Run(async () =>
+                    {
+                        try
+                        {
+                            if (OnChangeDetected != null)
+                            {
+                                await OnChangeDetected(newPath, FileChangeType.Renamed, oldPath);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Log($"❌ Polling rename sync error: {ex.Message}");
+                        }
+                    });
+                }
+
+                _lastSnapshot.Clear();
+                foreach (var kv in currentSnapshot)
+                    _lastSnapshot[kv.Key] = kv.Value;
+            }
+            catch (Exception ex)
+            {
+                Log($"⚠️ Polling error: {ex.Message}");
+            }
+            finally
+            {
+                _pollingLock.Release();
+            }
+        }
+
+        private void ScanDirectoryForSnapshotInto(string path, Dictionary<string, FileSystemSnapshot> snapshot)
+        {
+            try
+            {
+                foreach (var dir in Directory.GetDirectories(path))
+                {
+                    if (ShouldSkipFile(dir)) continue;
+
+                    var dirInfo = new DirectoryInfo(dir);
+                    snapshot[dir] = new FileSystemSnapshot
+                    {
+                        Path = dir,
+                        IsDirectory = true,
+                        Size = 0,
+                        LastWriteTimeUtc = dirInfo.LastWriteTimeUtc
+                    };
+
+                    ScanDirectoryForSnapshotInto(dir, snapshot);
+                }
+
+                foreach (var file in Directory.GetFiles(path))
+                {
+                    if (ShouldSkipFile(file)) continue;
+
+                    var fileInfo = new FileInfo(file);
+                    snapshot[file] = new FileSystemSnapshot
+                    {
+                        Path = file,
+                        IsDirectory = false,
+                        Size = fileInfo.Length,
+                        LastWriteTimeUtc = fileInfo.LastWriteTimeUtc
+                    };
+                }
+            }
+            catch (UnauthorizedAccessException) { }
+            catch (Exception ex)
+            {
+                Log($"⚠️ Error scanning {path}: {ex.Message}");
+            }
+        }
+
+        private List<(string oldPath, string newPath)> DetectRenames(
+            List<string> removed,
+            List<string> added,
+            ConcurrentDictionary<string, FileSystemSnapshot> oldSnapshot,
+            Dictionary<string, FileSystemSnapshot> newSnapshot)
+        {
+            var renames = new List<(string, string)>();
+
+            var removedDirs = removed.Where(p => oldSnapshot.TryGetValue(p, out var s) && s.IsDirectory).ToList();
+            var addedDirs = added.Where(p => newSnapshot.TryGetValue(p, out var s) && s.IsDirectory).ToList();
+
+            foreach (var removedDir in removedDirs)
+            {
+                foreach (var addedDir in addedDirs)
+                {
+                    if (IsSameDirectory(removedDir, addedDir, oldSnapshot, newSnapshot))
+                    {
+                        renames.Add((removedDir, addedDir));
+                        removed.Remove(removedDir);
+                        added.Remove(addedDir);
+                        Log($"🔍 Matched folder rename: {removedDir} → {addedDir}");
+                        break;
+                    }
+                }
+            }
+
+            var removedFiles = removed.Where(p => oldSnapshot.TryGetValue(p, out var s) && !s.IsDirectory).ToList();
+            var addedFiles = added.Where(p => newSnapshot.TryGetValue(p, out var s) && !s.IsDirectory).ToList();
+
+            foreach (var removedFile in removedFiles)
+            {
+                var oldSnap = oldSnapshot[removedFile];
+
+                foreach (var addedFile in addedFiles)
+                {
+                    var newSnap = newSnapshot[addedFile];
+
+                    if (newSnap.Size == oldSnap.Size &&
+                        Path.GetFileName(removedFile) == Path.GetFileName(addedFile))
+                    {
+                        renames.Add((removedFile, addedFile));
+                        removed.Remove(removedFile);
+                        added.Remove(addedFile);
+                        break;
+                    }
+                }
+            }
+
+            return renames;
+        }
+
+        private bool IsSameDirectory(
+            string oldDir,
+            string newDir,
+            ConcurrentDictionary<string, FileSystemSnapshot> oldSnapshot,
+            Dictionary<string, FileSystemSnapshot> newSnapshot)
+        {
+            var oldChildren = oldSnapshot.Keys.Where(p => p.StartsWith(oldDir + Path.DirectorySeparatorChar)).Take(5).ToList();
+            var newChildren = newSnapshot.Keys.Where(p => p.StartsWith(newDir + Path.DirectorySeparatorChar)).Take(5).ToList();
+
+            if (oldChildren.Count != newChildren.Count)
+                return false;
+
+            if (oldChildren.Count == 0)
+                return Path.GetFileName(oldDir) == Path.GetFileName(newDir);
+
+            int matches = 0;
+            foreach (var oldChild in oldChildren)
+            {
+                var oldName = Path.GetFileName(oldChild);
+                if (newChildren.Any(nc => Path.GetFileName(nc) == oldName))
+                    matches++;
+            }
+
+            return matches >= Math.Min(3, oldChildren.Count);
         }
 
         private void OnFileCreated(object sender, FileSystemEventArgs e)
@@ -209,7 +461,6 @@ namespace MountUtility.WPF.FileWatcher
         {
             if ((ShouldSkipFile(e.FullPath) && ShouldSkipFile(e.OldFullPath)) || AreEventsSuppressed()) return;
 
-            // Handle rename immediately without debounce to catch quick renames
             _ = Task.Run(async () =>
             {
                 try
@@ -247,7 +498,6 @@ namespace MountUtility.WPF.FileWatcher
                     else if (existing.ChangeType == FileChangeType.Created &&
                              changeType == FileChangeType.Modified)
                     {
-                        // keep Created
                     }
                     else if (changeType == FileChangeType.Deleted)
                     {
@@ -275,7 +525,6 @@ namespace MountUtility.WPF.FileWatcher
 
         private async Task ScheduleProcessPendingChangesAsync()
         {
-            // ✅ FIX: Don't skip if already processing, queue will handle it
             if (!await _processingLock.WaitAsync(0).ConfigureAwait(false))
             {
                 Log("⏳ Processing already in progress, will process in next cycle");
@@ -313,7 +562,6 @@ namespace MountUtility.WPF.FileWatcher
                 foreach (var kv in ready)
                     _pendingChanges.TryRemove(kv.Key, out _);
 
-                // ✅ FIX: Process with suppression to avoid feedback loops
                 Interlocked.Exchange(ref _suppressEventsFlag, 1);
                 try
                 {
@@ -336,7 +584,6 @@ namespace MountUtility.WPF.FileWatcher
                 }
                 finally
                 {
-                    // ✅ FIX: Wait before re-enabling events to let writes settle
                     await Task.Delay(1000);
                     Interlocked.Exchange(ref _suppressEventsFlag, 0);
                 }
@@ -393,10 +640,18 @@ namespace MountUtility.WPF.FileWatcher
                         return true;
                     }
                 }
+                else if (Directory.Exists(path))
+                {
+                    var attrs = File.GetAttributes(path);
+                    if (attrs.HasFlag(FileAttributes.Hidden) ||
+                        attrs.HasFlag(FileAttributes.System))
+                    {
+                        return true;
+                    }
+                }
             }
             catch
             {
-                // ignore
             }
 
             return false;
@@ -416,7 +671,9 @@ namespace MountUtility.WPF.FileWatcher
             StopWatcher();
 
             _processingLock?.Dispose();
+            _pollingLock?.Dispose();
             try { _debounceTimer?.Dispose(); } catch { }
+            try { _pollingTimer?.Dispose(); } catch { }
         }
     }
 }
