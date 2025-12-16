@@ -8,10 +8,13 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using MountUtility.WPF.DTOs;
+using MountUtility.WPF.Helpers;
+using System.Collections.Generic;
+using System.Linq;
 
 namespace MountUtility.WPF.Views
 {
-    public partial class FileExplorerWindow : Window
+    public partial class FileExplorerWindow : Window, INotifyPropertyChanged
     {
         private readonly DiskManagementService _diskService;
         private DiskInfoResponse? _mountedDisk;
@@ -21,29 +24,47 @@ namespace MountUtility.WPF.Views
         private string? _subscriptionId;
         private bool _isLoading = false;
 
+        private List<string> _navigationHistory = new();
+        private int _navigationIndex = -1;
+        private bool _isNavigating = false;
+
+        private List<FileViewModel> _clipboardItems = new();
+        private ClipboardOperation _clipboardOperation = ClipboardOperation.None;
+
+        private Point _dragStartPoint;
+        private bool _isDragging = false;
+
+        private ViewMode _currentViewMode = ViewMode.Details;
+
+        public event PropertyChangedEventHandler? PropertyChanged;
+
+        public bool CanGoBack => _navigationIndex > 0;
+        public bool CanGoForward => _navigationIndex < _navigationHistory.Count - 1;
+
         public FileExplorerWindow(DiskManagementService diskService)
         {
             InitializeComponent();
             _diskService = diskService;
-            FilesDataGrid.ItemsSource = _files;
+            FilesListView.ItemsSource = _files;
             BreadcrumbControl.ItemsSource = _breadcrumbs;
+
+            SetDetailsView();
 
             Loaded += FileExplorerWindow_Loaded;
             Closing += FileExplorerWindow_Closing;
+
+            DataContext = this;
         }
 
-        // Normalize any path to consistent format: leading '/', no trailing '/', root is "/"
         public static string NormalizePath(string path)
         {
             if (string.IsNullOrWhiteSpace(path)) return "/";
 
-            // Replace backslashes and trim whitespace
             path = path.Replace("\\", "/").Trim();
 
             if (path == "/") return "/";
 
             if (!path.StartsWith("/")) path = "/" + path;
-            // remove trailing slash except when it's root
             if (path.Length > 1 && path.EndsWith("/")) path = path.TrimEnd('/');
 
             return path;
@@ -91,26 +112,37 @@ namespace MountUtility.WPF.Views
 
             try
             {
-                // normalize current path before requesting
                 _currentPath = NormalizePath(_currentPath);
+
+                if (!_isNavigating)
+                {
+                    if (_navigationIndex < _navigationHistory.Count - 1)
+                    {
+                        _navigationHistory.RemoveRange(_navigationIndex + 1, _navigationHistory.Count - _navigationIndex - 1);
+                    }
+
+                    if (_navigationHistory.Count == 0 || _navigationHistory[_navigationHistory.Count - 1] != _currentPath)
+                    {
+                        _navigationHistory.Add(_currentPath);
+                        _navigationIndex = _navigationHistory.Count - 1;
+                    }
+                }
+
+                _isNavigating = false;
 
                 var filesList = await _diskService.GetFilesAsync(_mountedDisk.Id, _currentPath);
 
                 if (filesList == null) filesList = new List<FileInfoResponse>();
 
-                //var deduped = filesList
-                //    .GroupBy(f => NormalizePath(f.Path))
-                //    .Select(g => g.First())
-                //    .ToList();
-
-                // clear and repopulate observable collection safely
                 _files.Clear();
-                foreach (var file in filesList)
+                foreach (var file in filesList.OrderByDescending(f => f.IsDirectory).ThenBy(f => f.Name))
                 {
                     _files.Add(new FileViewModel(file));
                 }
 
                 UpdateBreadcrumbs();
+                UpdateNavigationButtons();
+                UpdateStatusBar();
 
                 NoFilesMessage.Visibility = _files.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             }
@@ -142,6 +174,31 @@ namespace MountUtility.WPF.Views
             }
         }
 
+        private void UpdateNavigationButtons()
+        {
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CanGoBack)));
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CanGoForward)));
+        }
+
+        private void UpdateStatusBar()
+        {
+            var itemCount = _files.Count;
+            var folderCount = _files.Count(f => f.IsDirectory);
+            var fileCount = itemCount - folderCount;
+
+            ItemCountText.Text = $"{itemCount} item{(itemCount != 1 ? "s" : "")} ({folderCount} folder{(folderCount != 1 ? "s" : "")}, {fileCount} file{(fileCount != 1 ? "s" : "")})";
+
+            var selectedCount = FilesListView.SelectedItems.Count;
+            if (selectedCount > 0)
+            {
+                StatusText.Text = $"{selectedCount} item{(selectedCount != 1 ? "s" : "")} selected";
+            }
+            else
+            {
+                StatusText.Text = "Ready";
+            }
+        }
+
         private async void BreadcrumbButton_Click(object sender, RoutedEventArgs e)
         {
             var button = sender as Button;
@@ -153,10 +210,9 @@ namespace MountUtility.WPF.Views
             }
         }
 
-        private async void FilesDataGrid_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+        private async void FilesListView_MouseDoubleClick(object sender, MouseButtonEventArgs e)
         {
-            var selected = FilesDataGrid.SelectedItem as FileViewModel;
-            if (selected != null && selected.IsDirectory)
+            if (FilesListView.SelectedItem is FileViewModel selected && selected.IsDirectory)
             {
                 var newPath = NormalizePath(selected.Path);
                 if (newPath != _currentPath)
@@ -165,6 +221,28 @@ namespace MountUtility.WPF.Views
                     await LoadFiles();
                 }
             }
+        }
+
+        private void FilesListView_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            var hasSelection = FilesListView.SelectedItems.Count > 0;
+            var hasFileSelected = FilesListView.SelectedItems.Cast<FileViewModel>().Any(f => f.IsFile);
+            var hasSingleSelection = FilesListView.SelectedItems.Count == 1;
+
+            CutButton.IsEnabled = hasSelection;
+            CopyButton.IsEnabled = hasSelection;
+            RenameButton.IsEnabled = hasSingleSelection;
+            DeleteButton.IsEnabled = hasSelection;
+            DownloadButton.IsEnabled = hasFileSelected;
+            PreviewButton.IsEnabled = hasFileSelected && hasSingleSelection;
+
+            if (FilesListView.ContextMenu != null)
+            {
+                ContextDownloadMenuItem.IsEnabled = hasFileSelected;
+                ContextPreviewMenuItem.IsEnabled = hasFileSelected && hasSingleSelection;
+            }
+
+            UpdateStatusBar();
         }
 
         private async void ShowUploadDialog_Click(object sender, RoutedEventArgs e)
@@ -219,8 +297,7 @@ namespace MountUtility.WPF.Views
             {
                 try
                 {
-                    // Trim trailing slash from _currentPath before appending
-                    var folderPath = FileExplorerWindow.NormalizePath($"{_currentPath.TrimEnd('/')}/{dialog.FolderName}");
+                    var folderPath = NormalizePath($"{_currentPath.TrimEnd('/')}/{dialog.FolderName}");
 
                     var success = await _diskService.CreateDirectoryAsync(_mountedDisk.Id, folderPath);
                     if (success)
@@ -245,6 +322,8 @@ namespace MountUtility.WPF.Views
         {
             _currentPath = "/";
             _breadcrumbs.Clear();
+            _navigationHistory.Clear();
+            _navigationIndex = -1;
         }
 
         private async void RefreshFiles_Click(object sender, RoutedEventArgs e)
@@ -256,9 +335,8 @@ namespace MountUtility.WPF.Views
         {
             if (_mountedDisk == null) return;
 
-            var button = sender as Button;
-            var file = button?.Tag as FileViewModel;
-            if (file == null) return;
+            var file = FilesListView.SelectedItem as FileViewModel;
+            if (file == null || !file.IsFile) return;
 
             try
             {
@@ -280,26 +358,60 @@ namespace MountUtility.WPF.Views
         {
             if (_mountedDisk == null) return;
 
-            var button = sender as Button;
-            var file = button?.Tag as FileViewModel;
-            if (file == null) return;
+            var selectedFiles = FilesListView.SelectedItems.Cast<FileViewModel>().Where(f => f.IsFile).ToList();
+            if (selectedFiles.Count == 0) return;
 
             try
             {
-                var saveFileDialog = new SaveFileDialog
+                if (selectedFiles.Count == 1)
                 {
-                    FileName = file.Name,
-                    Title = "Save File"
-                };
-
-                if (saveFileDialog.ShowDialog() == true)
-                {
-                    var content = await _diskService.ReadFileAsync(_mountedDisk.Id, file.Path);
-                    if (content != null)
+                    var file = selectedFiles[0];
+                    var saveFileDialog = new SaveFileDialog
                     {
-                        await File.WriteAllBytesAsync(saveFileDialog.FileName, content);
-                        MessageBox.Show("File downloaded successfully!", "Success",
-                            MessageBoxButton.OK, MessageBoxImage.Information);
+                        FileName = file.Name,
+                        Title = "Save File"
+                    };
+
+                    if (saveFileDialog.ShowDialog() == true)
+                    {
+                        var content = await _diskService.ReadFileAsync(_mountedDisk.Id, file.Path);
+                        if (content != null)
+                        {
+                            await File.WriteAllBytesAsync(saveFileDialog.FileName, content);
+                            MessageBox.Show("File downloaded successfully!", "Success",
+                                MessageBoxButton.OK, MessageBoxImage.Information);
+                        }
+                    }
+                }
+                else
+                {
+                    var dialog = new OpenFileDialog
+                    {
+                        Title = "Select folder to save files",
+                        CheckFileExists = false,
+                        CheckPathExists = true,
+                        FileName = "Select Folder"
+                    };
+
+                    if (dialog.ShowDialog() == true)
+                    {
+                        var folderPath = Path.GetDirectoryName(dialog.FileName)!;
+
+                        foreach (var file in selectedFiles)
+                        {
+                            var content = await _diskService.ReadFileAsync(_mountedDisk.Id, file.Path);
+                            if (content != null)
+                            {
+                                var savePath = Path.Combine(folderPath, file.Name);
+                                await File.WriteAllBytesAsync(savePath, content);
+                            }
+                        }
+
+                        MessageBox.Show(
+                            $"{selectedFiles.Count} files downloaded successfully!",
+                            "Success",
+                            MessageBoxButton.OK,
+                            MessageBoxImage.Information);
                     }
                 }
             }
@@ -314,12 +426,12 @@ namespace MountUtility.WPF.Views
         {
             if (_mountedDisk == null) return;
 
-            var button = sender as Button;
-            var file = button?.Tag as FileViewModel;
-            if (file == null) return;
+            var selectedItems = FilesListView.SelectedItems.Cast<FileViewModel>().ToList();
+            if (selectedItems.Count == 0) return;
 
+            var itemText = selectedItems.Count == 1 ? $"'{selectedItems[0].Name}'" : $"{selectedItems.Count} items";
             var result = MessageBox.Show(
-                $"Are you sure you want to delete '{file.Name}'?",
+                $"Are you sure you want to delete {itemText}?",
                 "Confirm Delete",
                 MessageBoxButton.YesNo,
                 MessageBoxImage.Warning);
@@ -328,20 +440,28 @@ namespace MountUtility.WPF.Views
             {
                 try
                 {
-                    var success = await _diskService.DeleteFileAsync(_mountedDisk.Id, file.Path);
-                    if (success)
+                    var failedItems = new List<string>();
+
+                    foreach (var item in selectedItems)
                     {
-                        await LoadFiles();
+                        var success = await _diskService.DeleteFileAsync(_mountedDisk.Id, item.Path);
+                        if (!success)
+                        {
+                            failedItems.Add(item.Name);
+                        }
                     }
-                    else
+
+                    if (failedItems.Count > 0)
                     {
-                        MessageBox.Show("Failed to delete file", "Error",
+                        MessageBox.Show($"Failed to delete: {string.Join(", ", failedItems)}", "Error",
                             MessageBoxButton.OK, MessageBoxImage.Error);
                     }
+
+                    await LoadFiles();
                 }
                 catch (Exception ex)
                 {
-                    MessageBox.Show($"Failed to delete file: {ex.Message}", "Error",
+                    MessageBox.Show($"Failed to delete: {ex.Message}", "Error",
                         MessageBoxButton.OK, MessageBoxImage.Error);
                 }
             }
@@ -359,7 +479,6 @@ namespace MountUtility.WPF.Views
 
             var normalized = NormalizePath(_currentPath);
 
-            // remove trailing segment
             var lastSlash = normalized.LastIndexOf('/');
             if (lastSlash <= 0)
             {
@@ -373,6 +492,373 @@ namespace MountUtility.WPF.Views
 
             await LoadFiles();
         }
+
+        private async void GoBack_Click(object sender, RoutedEventArgs e)
+        {
+            if (CanGoBack)
+            {
+                _navigationIndex--;
+                _currentPath = _navigationHistory[_navigationIndex];
+                _isNavigating = true;
+                await LoadFiles();
+            }
+        }
+
+        private async void GoForward_Click(object sender, RoutedEventArgs e)
+        {
+            if (CanGoForward)
+            {
+                _navigationIndex++;
+                _currentPath = _navigationHistory[_navigationIndex];
+                _isNavigating = true;
+                await LoadFiles();
+            }
+        }
+
+        private void Cut_Click(object sender, RoutedEventArgs e)
+        {
+            _clipboardItems = FilesListView.SelectedItems.Cast<FileViewModel>().ToList();
+            _clipboardOperation = ClipboardOperation.Cut;
+            PasteButton.IsEnabled = true;
+            ContextPasteMenuItem.IsEnabled = true;
+
+            StatusText.Text = $"{_clipboardItems.Count} item{(_clipboardItems.Count != 1 ? "s" : "")} cut";
+        }
+
+        private void Copy_Click(object sender, RoutedEventArgs e)
+        {
+            _clipboardItems = FilesListView.SelectedItems.Cast<FileViewModel>().ToList();
+            _clipboardOperation = ClipboardOperation.Copy;
+            PasteButton.IsEnabled = true;
+            ContextPasteMenuItem.IsEnabled = true;
+
+            StatusText.Text = $"{_clipboardItems.Count} item{(_clipboardItems.Count != 1 ? "s" : "")} copied";
+        }
+
+        private async void Paste_Click(object sender, RoutedEventArgs e)
+        {
+            if (_mountedDisk == null || _clipboardItems.Count == 0) return;
+
+            try
+            {
+                foreach (var item in _clipboardItems)
+                {
+                    var targetPath = NormalizePath($"{_currentPath.TrimEnd('/')}/{item.Name}");
+
+                    if (item.IsFile)
+                    {
+                        var content = await _diskService.ReadFileAsync(_mountedDisk.Id, item.Path);
+                        if (content != null)
+                        {
+                            var request = new WriteFileRequest
+                            {
+                                Path = NormalizePath(_currentPath),
+                                FileName = item.Name,
+                                Content = content
+                            };
+
+                            await _diskService.WriteFileAsync(_mountedDisk.Id, request);
+                        }
+                    }
+                    else
+                    {
+                        await _diskService.CreateDirectoryAsync(_mountedDisk.Id, targetPath);
+                    }
+
+                    if (_clipboardOperation == ClipboardOperation.Cut)
+                    {
+                        await _diskService.DeleteFileAsync(_mountedDisk.Id, item.Path);
+                    }
+                }
+
+                if (_clipboardOperation == ClipboardOperation.Cut)
+                {
+                    _clipboardItems.Clear();
+                    _clipboardOperation = ClipboardOperation.None;
+                    PasteButton.IsEnabled = false;
+                    ContextPasteMenuItem.IsEnabled = false;
+                }
+
+                await LoadFiles();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Paste failed: {ex.Message}", "Error",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        private async void Rename_Click(object sender, RoutedEventArgs e)
+        {
+            if (_mountedDisk == null) return;
+
+            var item = FilesListView.SelectedItem as FileViewModel;
+            if (item == null) return;
+
+            var dialog = new RenameDialog(item.Name);
+            if (dialog.ShowDialog() == true)
+            {
+                try
+                {
+                    var parentPath = item.Path.Substring(0, item.Path.LastIndexOf('/'));
+                    if (string.IsNullOrEmpty(parentPath)) parentPath = "/";
+
+                    var newPath = NormalizePath($"{parentPath.TrimEnd('/')}/{dialog.NewName}");
+
+                    if (item.IsFile)
+                    {
+                        var content = await _diskService.ReadFileAsync(_mountedDisk.Id, item.Path);
+                        if (content != null)
+                        {
+                            var request = new WriteFileRequest
+                            {
+                                Path = NormalizePath(parentPath),
+                                FileName = dialog.NewName,
+                                Content = content
+                            };
+
+                            var success = await _diskService.WriteFileAsync(_mountedDisk.Id, request);
+                            if (success)
+                            {
+                                await _diskService.DeleteFileAsync(_mountedDisk.Id, item.Path);
+                                await LoadFiles();
+                            }
+                        }
+                    }
+                    else
+                    {
+                        MessageBox.Show("Folder renaming not yet implemented", "Information",
+                            MessageBoxButton.OK, MessageBoxImage.Information);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show($"Rename failed: {ex.Message}", "Error",
+                        MessageBoxButton.OK, MessageBoxImage.Error);
+                }
+            }
+        }
+
+        private void FilesListView_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+        {
+            _dragStartPoint = e.GetPosition(null);
+        }
+
+        private void FilesListView_MouseMove(object sender, MouseEventArgs e)
+        {
+            if (e.LeftButton == MouseButtonState.Pressed && !_isDragging)
+            {
+                Point position = e.GetPosition(null);
+                if (Math.Abs(position.X - _dragStartPoint.X) > SystemParameters.MinimumHorizontalDragDistance ||
+                    Math.Abs(position.Y - _dragStartPoint.Y) > SystemParameters.MinimumVerticalDragDistance)
+                {
+                    StartDrag();
+                }
+            }
+        }
+
+        private void StartDrag()
+        {
+            if (FilesListView.SelectedItems.Count == 0) return;
+
+            _isDragging = true;
+            var selectedItems = FilesListView.SelectedItems.Cast<FileViewModel>().ToList();
+
+            var dataObject = new DataObject("FileExplorerItems", selectedItems);
+            DragDrop.DoDragDrop(FilesListView, dataObject, DragDropEffects.Copy | DragDropEffects.Move);
+
+            _isDragging = false;
+        }
+
+        private void FilesListView_DragOver(object sender, DragEventArgs e)
+        {
+            if (e.Data.GetDataPresent("FileExplorerItems"))
+            {
+                e.Effects = (e.KeyStates & DragDropKeyStates.ControlKey) == DragDropKeyStates.ControlKey
+                    ? DragDropEffects.Copy
+                    : DragDropEffects.Move;
+            }
+            else if (e.Data.GetDataPresent(DataFormats.FileDrop))
+            {
+                e.Effects = DragDropEffects.Copy;
+            }
+            else
+            {
+                e.Effects = DragDropEffects.None;
+            }
+
+            e.Handled = true;
+        }
+
+        private async void FilesListView_Drop(object sender, DragEventArgs e)
+        {
+            if (_mountedDisk == null) return;
+
+            try
+            {
+                if (e.Data.GetDataPresent("FileExplorerItems"))
+                {
+                    var items = e.Data.GetData("FileExplorerItems") as List<FileViewModel>;
+                    if (items != null)
+                    {
+                        var isCopy = (e.KeyStates & DragDropKeyStates.ControlKey) == DragDropKeyStates.ControlKey;
+
+                        FileViewModel? targetFolder = null;
+                        var dropPosition = e.GetPosition(FilesListView);
+                        var element = FilesListView.InputHitTest(dropPosition) as FrameworkElement;
+
+                        while (element != null && element != FilesListView)
+                        {
+                            if (element is ListViewItem listViewItem)
+                            {
+                                targetFolder = listViewItem.DataContext as FileViewModel;
+                                break;
+                            }
+                            element = element.Parent as FrameworkElement;
+                        }
+
+                        var targetPath = targetFolder != null && targetFolder.IsDirectory
+                            ? targetFolder.Path
+                            : _currentPath;
+
+                        foreach (var item in items)
+                        {
+                            if (item.Path.StartsWith(targetPath + "/"))
+                            {
+                                continue;
+                            }
+
+                            var newPath = NormalizePath($"{targetPath.TrimEnd('/')}/{item.Name}");
+
+                            if (item.IsFile)
+                            {
+                                var content = await _diskService.ReadFileAsync(_mountedDisk.Id, item.Path);
+                                if (content != null)
+                                {
+                                    var request = new WriteFileRequest
+                                    {
+                                        Path = NormalizePath(targetPath),
+                                        FileName = item.Name,
+                                        Content = content
+                                    };
+
+                                    await _diskService.WriteFileAsync(_mountedDisk.Id, request);
+
+                                    if (!isCopy)
+                                    {
+                                        await _diskService.DeleteFileAsync(_mountedDisk.Id, item.Path);
+                                    }
+                                }
+                            }
+                        }
+
+                        await LoadFiles();
+                    }
+                }
+                else if (e.Data.GetDataPresent(DataFormats.FileDrop))
+                {
+                    var files = e.Data.GetData(DataFormats.FileDrop) as string[];
+                    if (files != null)
+                    {
+                        foreach (var filePath in files)
+                        {
+                            if (File.Exists(filePath))
+                            {
+                                var fileBytes = await File.ReadAllBytesAsync(filePath);
+                                var fileName = Path.GetFileName(filePath);
+
+                                var request = new WriteFileRequest
+                                {
+                                    Path = NormalizePath(_currentPath),
+                                    FileName = fileName,
+                                    Content = fileBytes
+                                };
+
+                                await _diskService.WriteFileAsync(_mountedDisk.Id, request);
+                            }
+                        }
+
+                        await LoadFiles();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Drop operation failed: {ex.Message}", "Error",
+                    MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+
+        private void ContextMenu_Open_Click(object sender, RoutedEventArgs e)
+        {
+            if (FilesListView.SelectedItem is FileViewModel selected && selected.IsDirectory)
+            {
+                _currentPath = NormalizePath(selected.Path);
+                Task.Run(async () => await Dispatcher.InvokeAsync(async () => await LoadFiles()));
+            }
+        }
+
+        private void SetDetailsView_Click(object sender, RoutedEventArgs e)
+        {
+            SetDetailsView();
+        }
+
+        private void SetTilesView_Click(object sender, RoutedEventArgs e)
+        {
+            SetTilesView();
+        }
+
+        private void SetListView_Click(object sender, RoutedEventArgs e)
+        {
+            SetListViewMode();
+        }
+
+        private void SetDetailsView()
+        {
+            _currentViewMode = ViewMode.Details;
+
+            var gridView = new GridView();
+            gridView.Columns.Add(new GridViewColumn
+            {
+                Header = "Name",
+                Width = 300,
+                CellTemplate = (DataTemplate)FindResource("DetailsViewTemplate")
+            });
+
+            FilesListView.View = gridView;
+            UpdateViewButtons();
+        }
+
+        private void SetTilesView()
+        {
+            _currentViewMode = ViewMode.Tiles;
+
+            FilesListView.View = null;
+            FilesListView.ItemTemplate = (DataTemplate)FindResource("TilesViewTemplate");
+
+            FilesListView.ItemsPanel = new ItemsPanelTemplate(new FrameworkElementFactory(typeof(WrapPanel)));
+
+            UpdateViewButtons();
+        }
+
+        private void SetListViewMode()
+        {
+            _currentViewMode = ViewMode.List;
+
+            FilesListView.View = null;
+            FilesListView.ItemTemplate = (DataTemplate)FindResource("ListViewTemplate");
+
+            FilesListView.ItemsPanel = new ItemsPanelTemplate(new FrameworkElementFactory(typeof(StackPanel)));
+
+            UpdateViewButtons();
+        }
+
+        private void UpdateViewButtons()
+        {
+            DetailsViewButton.Background = _currentViewMode == ViewMode.Details ? System.Windows.Media.Brushes.LightGray : System.Windows.Media.Brushes.Transparent;
+            TilesViewButton.Background = _currentViewMode == ViewMode.Tiles ? System.Windows.Media.Brushes.LightGray : System.Windows.Media.Brushes.Transparent;
+            ListViewButton.Background = _currentViewMode == ViewMode.List ? System.Windows.Media.Brushes.LightGray : System.Windows.Media.Brushes.Transparent;
+        }
     }
 
     public class FileViewModel : INotifyPropertyChanged
@@ -383,7 +869,8 @@ namespace MountUtility.WPF.Views
         public bool IsDirectory { get; set; }
         public DateTime ModifiedAt { get; set; }
 
-        public string DisplayName => (IsDirectory ? "📁 " : "📄 ") + Name;
+        public string IconGlyph => FileIconHelper.GetFileIcon(Name, IsDirectory);
+        public string TypeDescription => FileIconHelper.GetFileTypeDescription(Name, IsDirectory);
         public string FormattedSize => IsDirectory ? "" : FormatBytes(SizeInBytes);
         public string FormattedModified => ModifiedAt.ToLocalTime().ToString("g");
         public bool IsFile => !IsDirectory;
@@ -419,5 +906,19 @@ namespace MountUtility.WPF.Views
     {
         public string Name { get; set; } = string.Empty;
         public string Path { get; set; } = string.Empty;
+    }
+
+    public enum ClipboardOperation
+    {
+        None,
+        Cut,
+        Copy
+    }
+
+    public enum ViewMode
+    {
+        Details,
+        Tiles,
+        List
     }
 }
