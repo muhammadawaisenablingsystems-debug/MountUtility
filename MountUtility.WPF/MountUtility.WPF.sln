@@ -1,9 +1,11 @@
 ﻿
 Microsoft Visual Studio Solution File, Format Version 12.00
-# Visual Studio Version 18
-VisualStudioVersion = 18.0.11205.157 d18.0
+# Visual Studio Version 17
+VisualStudioVersion = 17.14.36804.6
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MountUtility.WPF", "MountUtility.WPF.csproj", "{17BF96B7-DEFB-429D-AD73-CD5267D28E1D}"
+EndProject
+Project("{54435603-DBB4-11D2-8724-00A0C9A8B90C}") = "DiskUtility Setup", "..\DiskUtility Setup\DiskUtility Setup.vdproj", "{2509E21E-8FC7-46CF-507A-4EB0DD0F81F8}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -15,6 +17,8 @@ Global
 		{17BF96B7-DEFB-429D-AD73-CD5267D28E1D}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{17BF96B7-DEFB-429D-AD73-CD5267D28E1D}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{17BF96B7-DEFB-429D-AD73-CD5267D28E1D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{2509E21E-8FC7-46CF-507A-4EB0DD0F81F8}.Debug|Any CPU.ActiveCfg = Debug
+		{2509E21E-8FC7-46CF-507A-4EB0DD0F81F8}.Release|Any CPU.ActiveCfg = Release
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
