@@ -57,10 +57,10 @@
                     "Name" = "8:Microsoft .NET Framework 4.7.2 (x86 and x64)"
                     "ProductCode" = "8:.NETFramework,Version=v4.7.2"
                     }
-                    "{EDC2488A-8267-493A-A98E-7D9C3B36CDF3}:Microsoft.NetCore.CoreRuntime.9.0.x86"
+                    "{EDC2488A-8267-493A-A98E-7D9C3B36CDF3}:Microsoft.NetCore.CoreRuntime.10.0.x86"
                     {
-                    "Name" = "8:.NET Runtime 9.0.11 (x86)"
-                    "ProductCode" = "8:Microsoft.NetCore.CoreRuntime.9.0.x86"
+                    "Name" = "8:.NET Runtime 10.0.0 (x86)"
+                    "ProductCode" = "8:Microsoft.NetCore.CoreRuntime.10.0.x86"
                     }
                 }
             }
@@ -87,6 +87,14 @@
             "PrerequisitesLocation" = "2:1"
             "Url" = "8:"
             "ComponentsUrl" = "8:"
+                "Items"
+                {
+                    "{EDC2488A-8267-493A-A98E-7D9C3B36CDF3}:.NETFramework,Version=v4.7.2"
+                    {
+                    "Name" = "8:Microsoft .NET Framework 4.7.2 (x86 and x64)"
+                    "ProductCode" = "8:.NETFramework,Version=v4.7.2"
+                    }
+                }
             }
         }
     }
@@ -759,7 +767,7 @@
         {
             "{5259A561-127C-4D43-A0A1-72F10C7B3BF8}:_8C54DBB651D34EB1B3C81C736FC9A566"
             {
-            "SourcePath" = "8:..\\MountUtility.WPF\\obj\\Debug\\net9.0-windows\\apphost.exe"
+            "SourcePath" = "8:..\\MountUtility.WPF\\obj\\Debug\\net10.0-windows\\apphost.exe"
             "TargetName" = "8:"
             "Tag" = "8:"
             "Folder" = "8:_9B42A2A6E4E045FAB14A83C5967AC532"
