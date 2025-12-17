@@ -32,6 +32,7 @@ namespace MountUtility.Services
         private const int SHCNE_UPDATEDIR = 0x1000;
         private const uint SHCNF_PATH = 0x0005;
         private const uint SHCNF_FLUSH = 0x1000;
+        private const int SHCNE_DELETE = 0x0003;  // Item deleted
 
         public RealtimeVaultSyncService(
             ICryptographyService cryptographyService,
@@ -63,7 +64,7 @@ namespace MountUtility.Services
             Console.WriteLine("⛔ Realtime Sync shutdown");
         }
 
-        private void NotifyExplorerChange(string fullPath, bool isDirectory = false, bool isCreated = false)
+        private void NotifyExplorerChange(string fullPath, bool isDirectory = false, bool isCreated = false, bool isDeleted = false)
         {
             try
             {
@@ -72,13 +73,17 @@ namespace MountUtility.Services
                 {
                     int eventId;
 
-                    if (isDirectory)
+                    if (isDeleted)
+                    {
+                        eventId = SHCNE_DELETE;
+                    }
+                    else if (isDirectory)
                     {
                         eventId = isCreated ? SHCNE_MKDIR : SHCNE_UPDATEDIR;
                     }
                     else
                     {
-                        eventId = SHCNE_UPDATEITEM;
+                        eventId = isCreated ? SHCNE_CREATE : SHCNE_UPDATEITEM;
                     }
 
                     SHChangeNotify(eventId, SHCNF_PATH | SHCNF_FLUSH, pathPtr, IntPtr.Zero);
@@ -398,7 +403,7 @@ namespace MountUtility.Services
                         }
                     }
 
-                    NotifyExplorerChange(physicalFullPath, isDirectory);
+                    NotifyExplorerChange(physicalFullPath, isDirectory, isDeleted: true);
 
                     Console.WriteLine($"✅ Removed physical path: {physicalFullPath}");
                 }
