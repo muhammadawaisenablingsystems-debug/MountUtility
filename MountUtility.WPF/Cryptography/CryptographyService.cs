@@ -6,7 +6,7 @@ using MountUtility.WPF.Interfaces;
 
 namespace MountUtility.WPF.Cryptography
 {
-    public class HybridEncryptionService : ICryptographyService
+    public class CryptographyService : ICryptographyService
     {
         private const int KeySize = 32;
         private const int NonceSize = 12;

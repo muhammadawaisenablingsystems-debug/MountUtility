@@ -11,7 +11,7 @@ using System.Text.Json;
 
 namespace DiskMountUtility.Infrastructure.Storage
 {
-    public class VirtualDiskManager : IVirtualDiskService
+    public class VirtualDiskService : IVirtualDiskService
     {
         private readonly ICryptographyService _cryptographyService;
         private readonly IDiskRepository _diskRepository;
@@ -25,7 +25,7 @@ namespace DiskMountUtility.Infrastructure.Storage
         // ✅ Track VHDX handle to properly dispose
         private SafeFileHandle? _activeVhdxHandle;
 
-        public VirtualDiskManager(ICryptographyService cryptographyService, IDiskRepository diskRepository)
+        public VirtualDiskService(ICryptographyService cryptographyService, IDiskRepository diskRepository)
         {
             _cryptographyService = cryptographyService;
             _diskRepository = diskRepository;
@@ -1068,6 +1068,8 @@ namespace DiskMountUtility.Infrastructure.Storage
 
                 CopyDirectory(tempExtractFolder, driveRoot);
 
+                NotifyExplorerMountComplete(driveRoot, driveLetter);
+
                 disk.TempMountPath = tempVhdxPath;
                 disk.Status = DiskStatus.Mounted;
                 disk.LastMountedAt = DateTime.UtcNow;
@@ -1094,6 +1096,61 @@ namespace DiskMountUtility.Infrastructure.Storage
             }
         }
 
+        private void NotifyExplorerMountComplete(string drivePath, char driveLetter)
+        {
+            try
+            {
+                Console.WriteLine($"🔔 Notifying Explorer of mount completion: {drivePath}");
+
+                // Multiple notification events for best coverage
+                IntPtr pathPtr = Marshal.StringToHGlobalUni(drivePath);
+                try
+                {
+                    // 1. Update directory (most important for showing files)
+                    SHChangeNotify(SHCNE_UPDATEDIR, SHCNF_PATH | SHCNF_FLUSH, pathPtr, IntPtr.Zero);
+
+                    // 2. Media inserted event
+                    SHChangeNotify(SHCNE_MEDIAINSERTED, SHCNF_PATH | SHCNF_FLUSH, pathPtr, IntPtr.Zero);
+
+                    // 3. Association changed (global refresh)
+                    SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, IntPtr.Zero, IntPtr.Zero);
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(pathPtr);
+                }
+
+                // 4. Additional drive-specific refresh
+                RefreshDriveInExplorer(driveLetter);
+
+                Console.WriteLine($"✅ Explorer notified successfully");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ Explorer notification failed: {ex.Message}");
+            }
+        }
+
+        private void RefreshDriveInExplorer(char driveLetter)
+        {
+            try
+            {
+                // Force refresh of the specific drive
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "cmd.exe",
+                    Arguments = $"/c echo ^< ^> | out-null & dir {driveLetter}:\\ >nul",
+                    CreateNoWindow = true,
+                    UseShellExecute = false
+                };
+
+                using (var process = Process.Start(psi))
+                {
+                    process?.WaitForExit(1000);
+                }
+            }
+            catch { }
+        }
         private static void CopyDirectory(string sourceDir, string destinationDir)
         {
             foreach (var dirPath in Directory.GetDirectories(sourceDir, "*", SearchOption.AllDirectories))
@@ -1288,5 +1345,15 @@ namespace DiskMountUtility.Infrastructure.Storage
             uint ProviderSpecificFlags,
             ref ATTACH_VIRTUAL_DISK_PARAMETERS Parameters,
             IntPtr Overlapped);
+
+        [DllImport("shell32.dll", CharSet = CharSet.Auto)]
+        private static extern void SHChangeNotify(int wEventId, uint uFlags, IntPtr dwItem1, IntPtr dwItem2);
+
+        private const int SHCNE_ASSOCCHANGED = 0x08000000;
+        private const int SHCNE_UPDATEDIR = 0x00001000;
+        private const int SHCNE_MEDIAINSERTED = 0x00000020;
+        private const uint SHCNF_IDLIST = 0x0000;
+        private const uint SHCNF_PATH = 0x0001;
+        private const uint SHCNF_FLUSH = 0x1000;
     }
 }
