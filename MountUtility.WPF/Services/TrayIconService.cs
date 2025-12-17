@@ -1,4 +1,5 @@
 ﻿using Hardcodet.Wpf.TaskbarNotification;
+using MountUtility.WPF.Services;
 using MountUtility.WPF.Views;
 using System;
 using System.Drawing;
@@ -10,12 +11,14 @@ namespace MountUtility.WPF.Service
     public class TrayIconService : IDisposable
     {
         private readonly MainWindow _mainWindow;
+        private readonly IServiceProvider _services;
         private TaskbarIcon? _trayIcon;
         private bool _disposed;
 
-        public TrayIconService(MainWindow mainWindow)
+        public TrayIconService(MainWindow mainWindow, IServiceProvider services)
         {
             _mainWindow = mainWindow;
+            _services = services;
         }
 
         public void Initialize()
@@ -37,8 +40,12 @@ namespace MountUtility.WPF.Service
             openItem.Click += (s, e) => ShowMainWindow();
 
             var exitItem = new MenuItem { Header = "Exit" };
-            exitItem.Click += (s, e) =>
+            exitItem.Click += async (s, e) =>
             {
+                _trayIcon!.IsEnabled = false;
+
+                await AppShutdownCoordinator.SafeShutdownAsync(_services);
+
                 Dispose();
                 Application.Current.Shutdown();
             };

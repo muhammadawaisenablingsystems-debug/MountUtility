@@ -1,15 +1,17 @@
-﻿using MountUtility.Services;
-using DiskMountUtility.Infrastructure.Storage;
+﻿using DiskMountUtility.Infrastructure.Storage;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
-using MountUtility.WPF.Service;
-using MountUtility.WPF.Views;
-using System.Windows;
-using MountUtility.WPF.Persistence;
+using Microsoft.Win32;
+using MountUtility.Services;
 using MountUtility.WPF.Cryptography;
 using MountUtility.WPF.FileWatcher;
 using MountUtility.WPF.Interfaces;
+using MountUtility.WPF.Persistence;
+using MountUtility.WPF.Service;
+using MountUtility.WPF.Services;
+using MountUtility.WPF.Views;
+using System.Windows;
 
 namespace MountUtility.WPF
 {
@@ -21,6 +23,8 @@ namespace MountUtility.WPF
         protected override void OnStartup(StartupEventArgs e)
         {
             base.OnStartup(e);
+
+            SystemEvents.SessionEnding += OnSessionEnding;
 
             _host = Host.CreateDefaultBuilder()
                 .ConfigureServices((context, services) =>
@@ -58,6 +62,10 @@ namespace MountUtility.WPF
                 var main = _host.Services.GetRequiredService<MainWindow>();
                 main.Show();
             }
+        }
+        private async void OnSessionEnding(object? sender, SessionEndingEventArgs e)
+        {
+            await AppShutdownCoordinator.SafeShutdownAsync(_host!.Services);
         }
 
         protected override void OnExit(ExitEventArgs e)
