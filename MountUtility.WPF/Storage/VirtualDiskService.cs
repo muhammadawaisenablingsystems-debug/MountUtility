@@ -11,7 +11,7 @@ using System.Text.Json;
 
 namespace DiskMountUtility.Infrastructure.Storage
 {
-    public class VirtualDiskManager : IVirtualDiskService
+    public class VirtualDiskService : IVirtualDiskService
     {
         private readonly ICryptographyService _cryptographyService;
         private readonly IDiskRepository _diskRepository;
@@ -25,7 +25,7 @@ namespace DiskMountUtility.Infrastructure.Storage
         // ✅ Track VHDX handle to properly dispose
         private SafeFileHandle? _activeVhdxHandle;
 
-        public VirtualDiskManager(ICryptographyService cryptographyService, IDiskRepository diskRepository)
+        public VirtualDiskService(ICryptographyService cryptographyService, IDiskRepository diskRepository)
         {
             _cryptographyService = cryptographyService;
             _diskRepository = diskRepository;

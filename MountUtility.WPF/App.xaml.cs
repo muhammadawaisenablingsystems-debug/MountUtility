@@ -31,10 +31,10 @@ namespace MountUtility.WPF
                 {
                     services.AddDbContextFactory<AppDbContext>();
 
-                    services.AddSingleton<ICryptographyService, HybridEncryptionService>();
+                    services.AddSingleton<ICryptographyService, CryptographyService>();
                     services.AddSingleton<ILocalDbUnlocker, LocalDbUnlocker>();
                     services.AddSingleton<IDiskRepository, DiskRepository>();
-                    services.AddSingleton<IVirtualDiskService, VirtualDiskManager>();
+                    services.AddSingleton<IVirtualDiskService, VirtualDiskService>();
                     services.AddSingleton<VaultFileWatcherService>();
                     services.AddSingleton<RealtimeVaultSyncService>();
                     services.AddSingleton<RealtimeFileExplorerService>();

@@ -312,16 +312,18 @@ namespace MountUtility.WPF.Views
 
         private void Window_Closing(object sender, CancelEventArgs e)
         {
-            e.Cancel = true;
-            this.WindowState = WindowState.Minimized;
-            this.Hide();
+            if (WindowState != WindowState.Minimized)
+            {
+                e.Cancel = true; // prevent shutdown
+                this.Hide();     // hide to tray
+            }
         }
 
         private void Window_StateChanged(object sender, EventArgs e)
         {
             if (WindowState == WindowState.Minimized)
             {
-                this.Hide();
+                // Do Nothing
             }
         }
 
