@@ -8,6 +8,10 @@
 		<UseWPF>true</UseWPF>
 	</PropertyGroup>
 
+	<PropertyGroup>
+		<ApplicationManifest>app.manifest</ApplicationManifest>
+	</PropertyGroup>
+
 	<ItemGroup>
 		<None Remove="Resources\app.ico" />
 	</ItemGroup>
